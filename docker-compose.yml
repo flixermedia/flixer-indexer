@@ -1,0 +1,47 @@
+services:
+    redis:
+        image: redis:7-alpine
+        restart: unless-stopped
+        command: ["redis-server", "--appendonly", "yes"]
+        volumes:
+            - redis-data:/data
+        healthcheck:
+            test: ["CMD", "redis-cli", "ping"]
+            interval: 10s
+            timeout: 3s
+            retries: 5
+
+    indexer:
+        build: .
+        image: ghcr.io/flixermedia/flixer-indexer:latest
+        restart: unless-stopped
+        depends_on:
+            redis:
+                condition: service_healthy
+        environment:
+            PORT: 8092
+            ROLE: ${INDEXER_ROLE:-all}
+            FLIXER_URL: ${FLIXER_URL:-http://flixer:8083}
+            STREAM_TOKEN_SECRET: ${STREAM_TOKEN_SECRET:?set STREAM_TOKEN_SECRET}
+            REDIS_ADDR: redis:6379
+            LOG_LEVEL: ${INDEXER_LOG_LEVEL:-info}
+            METADATA_LANGUAGE: ${METADATA_LANGUAGE:-en}
+            TMDB_API_KEY: ${TMDB_API_KEY:-}
+            TVDB_API_KEY: ${TVDB_API_KEY:-}
+            OMDB_API_KEY: ${OMDB_API_KEY:-}
+            FANART_API_KEY: ${FANART_API_KEY:-}
+            AUDIODB_API_KEY: ${AUDIODB_API_KEY:-}
+            DISCOGS_TOKEN: ${DISCOGS_TOKEN:-}
+            ANIDB_CLIENT: ${ANIDB_CLIENT:-}
+        volumes:
+            # Must resolve to the same paths flixer and flixer-streamer use.
+            # Read-write so artwork/NFO can be stored alongside media; use :ro
+            # if every library uses cache image storage.
+            - ${MEDIA_PATH:-../flixer-data/media}:/media
+            - indexer-cache:/var/cache/flixer/indexer
+        ports:
+            - "${INDEXER_PORT:-8092}:8092"
+
+volumes:
+    redis-data:
+    indexer-cache:
