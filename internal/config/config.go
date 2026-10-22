@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Queue names, shared by the pipeline, the pool and the API.
@@ -62,6 +63,12 @@ type Config struct {
 	OpenSubtitlesPassword string
 	SubtitleLanguages     []string
 	SubtitleAutoFetch     bool
+	// WatchFolders scans a library automatically when files appear in its folders.
+	WatchFolders bool
+	// WatchDebounce is how long a library must be quiet after a change before it is scanned.
+	WatchDebounce time.Duration
+	// WatchRescan scans every library on this interval, for network shares that report no changes. Zero disables it.
+	WatchRescan time.Duration
 }
 
 func Load() (Config, error) {
@@ -128,6 +135,14 @@ func Load() (Config, error) {
 		cachePath = abs
 	}
 	flixerURL := envOrDefault("FLIXER_URL", envOrDefault("FLIXER_INTERNAL_URL", "http://localhost:8083"))
+	debounce, err := parseDuration("WATCH_DEBOUNCE", "30s")
+	if err != nil {
+		return Config{}, err
+	}
+	rescan, err := parseDuration("WATCH_RESCAN_INTERVAL", "0")
+	if err != nil {
+		return Config{}, err
+	}
 	return Config{
 		Port:         port,
 		Role:         role,
@@ -154,7 +169,23 @@ func Load() (Config, error) {
 		OpenSubtitlesPassword: os.Getenv("OPENSUBTITLES_PASSWORD"),
 		SubtitleLanguages:     splitCSV(envOrDefault("SUBTITLE_LANGUAGES", envOrDefault("METADATA_LANGUAGE", "en"))),
 		SubtitleAutoFetch:     !strings.EqualFold(strings.TrimSpace(os.Getenv("SUBTITLE_AUTO_FETCH")), "false"),
+
+		WatchFolders:  !strings.EqualFold(strings.TrimSpace(os.Getenv("WATCH_FOLDERS")), "false"),
+		WatchDebounce: debounce,
+		WatchRescan:   rescan,
 	}, nil
+}
+
+func parseDuration(key, fallback string) (time.Duration, error) {
+	value := envOrDefault(key, fallback)
+	if value == "0" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(value)
+	if err != nil || d < 0 {
+		return 0, fmt.Errorf("%s must be a duration such as 30s or 15m", key)
+	}
+	return d, nil
 }
 
 func splitCSV(value string) []string {

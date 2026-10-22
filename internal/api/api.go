@@ -18,6 +18,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/flixermedia/flixer-indexer/internal/auth"
+	"github.com/flixermedia/flixer-indexer/internal/bios"
 	"github.com/flixermedia/flixer-indexer/internal/config"
 	"github.com/flixermedia/flixer-indexer/internal/models"
 	"github.com/flixermedia/flixer-indexer/internal/pipeline"
@@ -41,12 +42,17 @@ type Server struct {
 	Now      func() time.Time
 	// CachePath is where downloaded artwork is cached; images there may be served.
 	CachePath string
+	// Bios looks up people's biographies; a default client is used when unset.
+	Bios *bios.Client
 }
 
 // Handler returns the routed, authenticated handler.
 func (s *Server) Handler() http.Handler {
 	if s.Now == nil {
 		s.Now = time.Now
+	}
+	if s.Bios == nil {
+		s.Bios = bios.New("flixer-indexer")
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.health)
@@ -59,11 +65,14 @@ func (s *Server) Handler() http.Handler {
 	signed.HandleFunc("GET /internal/tasks", s.tasks)
 	signed.HandleFunc("POST /internal/tasks/{queue}/{id}/cancel", s.cancelTask)
 	signed.HandleFunc("POST /internal/tasks/{queue}/{id}/retry", s.retryTask)
+	signed.HandleFunc("POST /internal/queues/{queue}/clear-failed", s.clearFailed)
 	signed.HandleFunc("POST /internal/queues/{queue}/pause", s.pause(true))
 	signed.HandleFunc("POST /internal/queues/{queue}/resume", s.pause(false))
 	signed.HandleFunc("GET /internal/concurrency", s.getConcurrency)
 	signed.HandleFunc("POST /internal/concurrency", s.setConcurrency)
 	signed.HandleFunc("POST /internal/image", s.image)
+	signed.HandleFunc("POST /internal/people/image", s.personImage)
+	signed.HandleFunc("POST /internal/people/bio", s.personBio)
 	signed.HandleFunc("POST /internal/subtitles/list", s.subtitleList)
 	signed.HandleFunc("POST /internal/subtitles/search", s.subtitleSearch)
 	signed.HandleFunc("POST /internal/subtitles/download", s.subtitleDownload)
@@ -356,6 +365,21 @@ func (s *Server) retryTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"retrying": id})
+}
+
+// clearFailed deletes every archived (permanently failed) task in a queue.
+func (s *Server) clearFailed(w http.ResponseWriter, r *http.Request) {
+	queue := r.PathValue("queue")
+	if !slices.Contains(config.Queues, queue) {
+		writeError(w, http.StatusNotFound, "unknown queue")
+		return
+	}
+	n, err := s.Inspector.DeleteAllArchivedTasks(queue)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not clear failed tasks")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"queue": queue, "cleared": n})
 }
 
 func (s *Server) pause(paused bool) http.HandlerFunc {

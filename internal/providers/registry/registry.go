@@ -37,7 +37,7 @@ type Registry struct {
 	episode []providers.EpisodeProvider
 	album   []providers.AlbumProvider
 	images  []providers.ImageProvider
-
+	discogs *discogs.Provider
 	stats    map[string]*httpx.Stats
 	language string
 	cache    *providers.Cache
@@ -143,6 +143,7 @@ func Build(settings models.Settings, envKeys map[string]string, userAgent, defau
 		dg := discogs.New(key, userAgent)
 		track("discogs", dg)
 		r.album = append(r.album, dg)
+		r.discogs = dg
 	}
 	if _, ok := resolve("coverartarchive"); ok {
 		ca := musicbrainz.NewCoverArt(userAgent)
@@ -154,6 +155,14 @@ func Build(settings models.Settings, envKeys map[string]string, userAgent, defau
 
 // Language is the metadata language providers are asked for.
 func (r *Registry) Language() string { return r.language }
+
+// Artist looks a music artist up on Discogs. It returns httpx.ErrNotFound when Discogs is not enabled.
+func (r *Registry) Artist(ctx context.Context, name string) (*discogs.Artist, error) {
+	if r.discogs == nil {
+		return nil, httpx.ErrNotFound
+	}
+	return r.discogs.Artist(ctx, name)
+}
 
 // Stats returns per-provider request counters.
 func (r *Registry) Stats() map[string]httpx.Snapshot {
