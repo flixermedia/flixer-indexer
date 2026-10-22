@@ -28,6 +28,9 @@ Requires Redis, and `ffprobe`/`ffmpeg` on PATH (or `FFPROBE_PATH`/`FFMPEG_PATH`)
 | `STREAM_TOKEN_SECRET` | — | shared HMAC secret (falls back to `JWT_SECRET`) |
 | `REDIS_ADDR` | localhost:6379 | |
 | `CACHE_PATH` | ./cache/metadata | |
+| `WATCH_FOLDERS` | true | watch library folders and auto-scan after changes settle |
+| `WATCH_DEBOUNCE` | 30s | quiet time before an auto-scan is queued |
+| `WATCH_RESCAN_INTERVAL` | 0 (off) | periodic scan for SMB/NFS mounts that emit no file events, e.g. `15m` |
 | `FLIXER_MODE` | — | `stub` reads `STUB_LIBRARIES_FILE` (`{"libraries":[...]}`) and appends items to `STUB_OUTPUT_FILE` |
 
 Provider keys (`TMDB_API_KEY`, `TVDB_API_KEY`, `OMDB_API_KEY`, `FANART_API_KEY`, `AUDIODB_API_KEY`, `DISCOGS_TOKEN`, `ANIDB_CLIENT`) are fallbacks; flixer's settings take precedence.

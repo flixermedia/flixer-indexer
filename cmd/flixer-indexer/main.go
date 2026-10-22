@@ -16,6 +16,7 @@ import (
 	"github.com/flixermedia/flixer-indexer/internal/api"
 	"github.com/flixermedia/flixer-indexer/internal/config"
 	"github.com/flixermedia/flixer-indexer/internal/flixerclient"
+	"github.com/flixermedia/flixer-indexer/internal/bios"
 	"github.com/flixermedia/flixer-indexer/internal/images"
 	"github.com/flixermedia/flixer-indexer/internal/lyrics"
 	"github.com/flixermedia/flixer-indexer/internal/models"
@@ -24,6 +25,7 @@ import (
 	"github.com/flixermedia/flixer-indexer/internal/progress"
 	"github.com/flixermedia/flixer-indexer/internal/providers/registry"
 	"github.com/flixermedia/flixer-indexer/internal/settings"
+	"github.com/flixermedia/flixer-indexer/internal/watcher"
 
 )
 
@@ -101,12 +103,20 @@ func run() error {
 		defer pool.Shutdown(context.Background())
 	}
 	go reloader.Run(ctx)
+	if cfg.WatchFolders && cfg.Role != config.RoleWorker {
+		go func() {
+			w := &watcher.Watcher{Scanner: pipe, Log: log, Debounce: cfg.WatchDebounce, Rescan: cfg.WatchRescan}
+			if err := w.Run(ctx); err != nil {
+				log.Error("folder watcher stopped", "error", err)
+			}
+		}()
+	}
 
 	srv := &http.Server{
 		Addr: cfg.ListenAddress(),
 		Handler: (&api.Server{
 			Secret: cfg.Secret, Pipeline: pipe, Inspector: inspector, Progress: tracker, Redis: rdb,
-			Pool: pool, Reloader: reloader, Log: log, CachePath: cfg.CachePath,
+			Pool: pool, Reloader: reloader, Log: log, CachePath: cfg.CachePath, Bios: bios.New(cfg.UserAgent),
 		}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
