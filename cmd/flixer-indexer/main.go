@@ -4,10 +4,12 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -42,7 +44,19 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel})).With("app", "flixer-indexer")
+	var logOutput io.Writer = os.Stdout
+	if cfg.LogDir != "" {
+		if err := os.MkdirAll(cfg.LogDir, 0o755); err != nil {
+			return errors.New("create log directory: " + err.Error())
+		}
+		file, err := os.OpenFile(filepath.Join(cfg.LogDir, "indexer.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+		if err != nil {
+			return errors.New("open log file: " + err.Error())
+		}
+		defer file.Close()
+		logOutput = io.MultiWriter(os.Stdout, file)
+	}
+	log := slog.New(slog.NewJSONHandler(logOutput, &slog.HandlerOptions{Level: cfg.LogLevel})).With("app", "flixer-indexer")
 	slog.SetDefault(log)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
