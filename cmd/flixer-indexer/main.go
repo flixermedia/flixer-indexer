@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -14,9 +15,9 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/flixermedia/flixer-indexer/internal/api"
+	"github.com/flixermedia/flixer-indexer/internal/bios"
 	"github.com/flixermedia/flixer-indexer/internal/config"
 	"github.com/flixermedia/flixer-indexer/internal/flixerclient"
-	"github.com/flixermedia/flixer-indexer/internal/bios"
 	"github.com/flixermedia/flixer-indexer/internal/images"
 	"github.com/flixermedia/flixer-indexer/internal/lyrics"
 	"github.com/flixermedia/flixer-indexer/internal/models"
@@ -24,9 +25,9 @@ import (
 	"github.com/flixermedia/flixer-indexer/internal/probe"
 	"github.com/flixermedia/flixer-indexer/internal/progress"
 	"github.com/flixermedia/flixer-indexer/internal/providers/registry"
+	"github.com/flixermedia/flixer-indexer/internal/remoteconfig"
 	"github.com/flixermedia/flixer-indexer/internal/settings"
 	"github.com/flixermedia/flixer-indexer/internal/watcher"
-
 )
 
 func main() {
@@ -47,7 +48,20 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	rdb := redis.NewClient(&redis.Options{Addr: cfg.RedisAddr, Password: cfg.RedisPass, DB: cfg.RedisDB})
+	if !cfg.RedisFromEnv && !cfg.Stub {
+		remote, err := remoteconfig.Wait(ctx, cfg.FlixerURL, cfg.Secret, log)
+		if err != nil {
+			return err
+		}
+		cfg.RedisAddr, cfg.RedisUser, cfg.RedisPass = remote.Redis.Addr, remote.Redis.Username, remote.Redis.Password
+		cfg.RedisDB, cfg.RedisTLS = remote.Redis.DB, remote.Redis.TLS
+	}
+	var tlsConfig *tls.Config
+	if cfg.RedisTLS {
+		tlsConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	}
+
+	rdb := redis.NewClient(&redis.Options{Addr: cfg.RedisAddr, Username: cfg.RedisUser, Password: cfg.RedisPass, DB: cfg.RedisDB, TLSConfig: tlsConfig})
 	defer rdb.Close()
 	pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	err = rdb.Ping(pingCtx).Err()
@@ -64,7 +78,7 @@ func run() error {
 		client = flixerclient.New(cfg.FlixerURL, cfg.Secret)
 	}
 
-	redisOpt := asynq.RedisClientOpt{Addr: cfg.RedisAddr, Password: cfg.RedisPass, DB: cfg.RedisDB}
+	redisOpt := asynq.RedisClientOpt{Addr: cfg.RedisAddr, Username: cfg.RedisUser, Password: cfg.RedisPass, DB: cfg.RedisDB, TLSConfig: tlsConfig}
 	queue := asynq.NewClient(redisOpt)
 	defer queue.Close()
 	inspector := asynq.NewInspector(redisOpt)

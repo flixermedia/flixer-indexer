@@ -36,21 +36,25 @@ const (
 )
 
 type Config struct {
-	Port        string
-	Role        string
-	FlixerURL   string
-	Secret      []byte
-	Stub        bool
-	StubLibs    string
-	StubOutput  string
-	RedisAddr   string
-	RedisPass   string
-	RedisDB     int
-	CachePath   string
-	FFprobePath string
-	FFmpegPath  string
-	Concurrency map[string]int
-	LogLevel    slog.Level
+	Port       string
+	Role       string
+	FlixerURL  string
+	Secret     []byte
+	Stub       bool
+	StubLibs   string
+	StubOutput string
+	RedisAddr  string
+	RedisUser  string
+	RedisPass  string
+	RedisDB    int
+	RedisTLS   bool
+	// RedisFromEnv is true when REDIS_ADDR is set; otherwise flixer supplies the Redis settings.
+	RedisFromEnv bool
+	CachePath    string
+	FFprobePath  string
+	FFmpegPath   string
+	Concurrency  map[string]int
+	LogLevel     slog.Level
 	// ProviderKeys seed provider keys from the environment; flixer's values win.
 	ProviderKeys map[string]string
 	UserAgent    string
@@ -69,6 +73,30 @@ type Config struct {
 	WatchDebounce time.Duration
 	// WatchRescan scans every library on this interval, for network shares that report no changes. Zero disables it.
 	WatchRescan time.Duration
+}
+
+// secretFileWait is how long to wait for flixer to publish the shared secret on first start.
+const secretFileWait = 2 * time.Minute
+
+// ReadSecretFile returns the trimmed contents of path, waiting up to wait for it to appear. An empty path gives "".
+func ReadSecretFile(path string, wait time.Duration) (string, error) {
+	if path == "" {
+		return "", nil
+	}
+	deadline := time.Now().Add(wait)
+	for {
+		data, err := os.ReadFile(path)
+		if err == nil && strings.TrimSpace(string(data)) != "" {
+			return strings.TrimSpace(string(data)), nil
+		}
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return "", fmt.Errorf("read STREAM_TOKEN_SECRET_FILE: %w", err)
+		}
+		if time.Now().After(deadline) {
+			return "", fmt.Errorf("STREAM_TOKEN_SECRET_FILE %s was not published by flixer in time", path)
+		}
+		time.Sleep(time.Second)
+	}
 }
 
 func Load() (Config, error) {
@@ -90,8 +118,15 @@ func Load() (Config, error) {
 	if secret == "" {
 		secret = strings.TrimSpace(os.Getenv("JWT_SECRET"))
 	}
+	if secret == "" {
+		fromFile, err := ReadSecretFile(os.Getenv("STREAM_TOKEN_SECRET_FILE"), secretFileWait)
+		if err != nil {
+			return Config{}, err
+		}
+		secret = fromFile
+	}
 	if len([]byte(secret)) < 32 {
-		return Config{}, errors.New("STREAM_TOKEN_SECRET or JWT_SECRET must contain at least 32 bytes")
+		return Config{}, errors.New("STREAM_TOKEN_SECRET, STREAM_TOKEN_SECRET_FILE or JWT_SECRET must contain at least 32 bytes")
 	}
 
 	level, err := parseLogLevel(envOrDefault("LOG_LEVEL", "info"))
@@ -152,8 +187,11 @@ func Load() (Config, error) {
 		StubLibs:     os.Getenv("STUB_LIBRARIES_FILE"),
 		StubOutput:   envOrDefault("STUB_OUTPUT_FILE", "./cache/stub-items.jsonl"),
 		RedisAddr:    envOrDefault("REDIS_ADDR", "localhost:6379"),
+		RedisUser:    os.Getenv("REDIS_USERNAME"),
 		RedisPass:    os.Getenv("REDIS_PASSWORD"),
 		RedisDB:      redisDB,
+		RedisTLS:     strings.EqualFold(os.Getenv("REDIS_TLS"), "true"),
+		RedisFromEnv: strings.TrimSpace(os.Getenv("REDIS_ADDR")) != "",
 		CachePath:    cachePath,
 		FFprobePath:  ffprobe,
 		FFmpegPath:   envOrDefault("FFMPEG_PATH", "ffmpeg"),
