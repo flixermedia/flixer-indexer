@@ -51,6 +51,7 @@ type Config struct {
 	// RedisFromEnv is true when REDIS_ADDR is set; otherwise flixer supplies the Redis settings.
 	RedisFromEnv bool
 	CachePath    string
+	LogDir       string
 	FFprobePath  string
 	FFmpegPath   string
 	Concurrency  map[string]int
@@ -165,9 +166,18 @@ func Load() (Config, error) {
 		}
 	}
 
-	cachePath := envOrDefault("CACHE_PATH", "./cache/metadata")
+	dataPath := strings.TrimSpace(os.Getenv("DATA_PATH"))
+	cacheDefault := filepath.Join(dataPath, "metadata")
+	if dataPath == "" {
+		cacheDefault = "./cache/metadata"
+	}
+	cachePath := envOrDefault("CACHE_PATH", cacheDefault)
 	if abs, err := filepath.Abs(cachePath); err == nil {
 		cachePath = abs
+	}
+	logDir := strings.TrimSpace(os.Getenv("LOG_DIR"))
+	if logDir == "" && dataPath != "" {
+		logDir = filepath.Join(dataPath, "logs")
 	}
 	flixerURL := envOrDefault("FLIXER_URL", envOrDefault("FLIXER_INTERNAL_URL", "http://localhost:8083"))
 	debounce, err := parseDuration("WATCH_DEBOUNCE", "30s")
@@ -193,6 +203,7 @@ func Load() (Config, error) {
 		RedisTLS:     strings.EqualFold(os.Getenv("REDIS_TLS"), "true"),
 		RedisFromEnv: strings.TrimSpace(os.Getenv("REDIS_ADDR")) != "",
 		CachePath:    cachePath,
+		LogDir:       logDir,
 		FFprobePath:  ffprobe,
 		FFmpegPath:   envOrDefault("FFMPEG_PATH", "ffmpeg"),
 		Concurrency:  concurrency,
