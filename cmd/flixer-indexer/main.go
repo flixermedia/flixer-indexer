@@ -23,6 +23,7 @@ import (
 	"github.com/flixermedia/flixer-indexer/internal/images"
 	"github.com/flixermedia/flixer-indexer/internal/lyrics"
 	"github.com/flixermedia/flixer-indexer/internal/models"
+	"github.com/flixermedia/flixer-indexer/internal/monitoring"
 	"github.com/flixermedia/flixer-indexer/internal/pipeline"
 	"github.com/flixermedia/flixer-indexer/internal/probe"
 	"github.com/flixermedia/flixer-indexer/internal/progress"
@@ -61,6 +62,24 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// flixer decides whether Sentry runs; wait up to a minute for it, then start without.
+	sentryEnabled := false
+	flushSentry := func() {}
+	if !cfg.Stub {
+		sentryConfig := monitoring.Fetch(ctx, monitoring.FetchOptions{BaseURL: cfg.FlixerURL, App: "indexer", Logger: log})
+		var sentryErr error
+		sentryEnabled, flushSentry, sentryErr = monitoring.Start(sentryConfig, "")
+		if sentryErr != nil {
+			log.Warn("Sentry disabled", "error", sentryErr)
+		}
+	}
+	if sentryEnabled {
+		log = monitoring.WrapLogger(log)
+		slog.SetDefault(log)
+		log.Info("Sentry monitoring enabled")
+	}
+	defer flushSentry()
 
 	if !cfg.RedisFromEnv && !cfg.Stub {
 		remote, err := remoteconfig.Wait(ctx, cfg.FlixerURL, cfg.Secret, log)
@@ -130,29 +149,33 @@ func run() error {
 		}
 		defer pool.Shutdown(context.Background())
 	}
-	go reloader.Run(ctx)
+	monitoring.Go(func() { reloader.Run(ctx) })
 	if cfg.WatchFolders && cfg.Role != config.RoleWorker {
-		go func() {
+		monitoring.Go(func() {
 			w := &watcher.Watcher{Scanner: pipe, Log: log, Debounce: cfg.WatchDebounce, Rescan: cfg.WatchRescan}
 			if err := w.Run(ctx); err != nil {
 				log.Error("folder watcher stopped", "error", err)
 			}
-		}()
+		})
 	}
 
+	handler := (&api.Server{
+		Secret: cfg.Secret, Pipeline: pipe, Inspector: inspector, Progress: tracker, Redis: rdb,
+		Pool: pool, Reloader: reloader, Log: log, CachePath: cfg.CachePath, Bios: bios.New(cfg.UserAgent),
+	}).Handler()
+	if sentryEnabled {
+		handler = monitoring.Middleware(handler)
+	}
 	srv := &http.Server{
-		Addr: cfg.ListenAddress(),
-		Handler: (&api.Server{
-			Secret: cfg.Secret, Pipeline: pipe, Inspector: inspector, Progress: tracker, Redis: rdb,
-			Pool: pool, Reloader: reloader, Log: log, CachePath: cfg.CachePath, Bios: bios.New(cfg.UserAgent),
-		}).Handler(),
+		Addr:              cfg.ListenAddress(),
+		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	errs := make(chan error, 1)
-	go func() {
+	monitoring.Go(func() {
 		log.Info("flixer-indexer listening", "address", srv.Addr, "role", cfg.Role, "flixer", cfg.FlixerURL, "stub", cfg.Stub)
 		errs <- srv.ListenAndServe()
-	}()
+	})
 
 	select {
 	case err := <-errs:

@@ -127,10 +127,10 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
 	if err := s.Redis.Ping(ctx).Err(); err != nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "unavailable", "redis": false})
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "unavailable", "redis": false, "version": appVersion()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "redis": true})
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "redis": true, "version": appVersion()})
 }
 
 func (s *Server) scan(w http.ResponseWriter, r *http.Request) {
