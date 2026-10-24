@@ -24,7 +24,7 @@ Requires Redis, and `ffprobe`/`ffmpeg` on PATH (or `FFPROBE_PATH`/`FFMPEG_PATH`)
 | --- | --- | --- |
 | `PORT` | 8092 | |
 | `ROLE` | all | `all`, `api` or `worker` |
-| `FLIXER_URL` | http://localhost:8083 | alias `FLIXER_INTERNAL_URL` |
+| `FLIXER_URL` | http://localhost:8083 | alias `FLIXER_INTERNAL_URL`. At startup the indexer also asks flixer whether Sentry is enabled (toggle it in the admin dashboard); if flixer is unreachable it starts with Sentry off |
 | `STREAM_TOKEN_SECRET` | — | shared HMAC secret (falls back to `JWT_SECRET`) |
 | `REDIS_ADDR` | localhost:6379 | |
 | `CACHE_PATH` | ./cache/metadata | |
