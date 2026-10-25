@@ -84,7 +84,8 @@ func (p *Pipeline) ensureSubtitles(ctx context.Context, item *models.Item, h mod
 	if last, ok := p.subtitleMisses.Load(item.Path); ok && time.Since(last.(time.Time)) < subtitleRetryAfter {
 		return
 	}
-	existing, err := subtitles.List(item.Path)
+	target := subtitles.Target{Video: item.Path, Fallback: subtitles.FallbackDir(p.SubtitleDir, item.RootID, item.RelativePath)}
+	existing, err := subtitles.List(target)
 	if err != nil {
 		return
 	}
@@ -110,7 +111,7 @@ func (p *Pipeline) ensureSubtitles(ctx context.Context, item *models.Item, h mod
 		q.Hash = hash
 	}
 	for _, lang := range missing {
-		path, err := client.Fetch(ctx, item.Path, q, lang)
+		path, err := client.Fetch(ctx, target, q, lang)
 		switch {
 		case err == nil:
 			p.Log.Info("subtitles downloaded", "path", path, "language", lang)

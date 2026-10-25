@@ -6,6 +6,8 @@
 package subtitles
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -13,6 +15,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"syscall"
 	"unicode/utf8"
 )
 
@@ -60,10 +63,55 @@ func base(video string) string {
 	return strings.TrimSuffix(filepath.Base(video), filepath.Ext(video))
 }
 
-// List returns the subtitle files beside video, ordered by language then name.
-func List(video string) ([]Track, error) {
-	dir := filepath.Dir(video)
-	prefix := base(video) + "."
+// Target is a video plus the folder used for subtitles when the media folder
+// cannot be written (for example a read-only network share). Fallback may be empty.
+type Target struct {
+	Video    string
+	Fallback string
+}
+
+// FallbackDir returns the per-video folder under root, keyed like trickplay so
+// flixer-streamer can find it from the playback token alone. Empty without ids.
+func FallbackDir(root, rootID, relativePath string) string {
+	if root == "" || rootID == "" || relativePath == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(rootID + "\n" + relativePath))
+	return filepath.Join(root, hex.EncodeToString(sum[:])[:32])
+}
+
+// List returns the subtitle files beside the video and in the fallback folder,
+// ordered by language then name.
+func List(t Target) ([]Track, error) {
+	tracks, err := listDir(filepath.Dir(t.Video), base(t.Video)+".")
+	if err != nil {
+		return nil, err
+	}
+	if t.Fallback != "" {
+		stored, err := listDir(t.Fallback, base(t.Video)+".")
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+		for _, s := range stored {
+			dup := false
+			for _, existing := range tracks {
+				dup = dup || existing.File == s.File
+			}
+			if !dup {
+				tracks = append(tracks, s)
+			}
+		}
+	}
+	sort.Slice(tracks, func(i, j int) bool {
+		if tracks[i].Language != tracks[j].Language {
+			return tracks[i].Language < tracks[j].Language
+		}
+		return tracks[i].File < tracks[j].File
+	})
+	return tracks, nil
+}
+
+func listDir(dir, prefix string) ([]Track, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
@@ -84,12 +132,6 @@ func List(video string) ([]Track, error) {
 		track.Label = strings.Join(parts, " ")
 		tracks = append(tracks, track)
 	}
-	sort.Slice(tracks, func(i, j int) bool {
-		if tracks[i].Language != tracks[j].Language {
-			return tracks[i].Language < tracks[j].Language
-		}
-		return tracks[i].File < tracks[j].File
-	})
 	return tracks, nil
 }
 
@@ -105,19 +147,42 @@ func Has(tracks []Track, language string) bool {
 }
 
 // Save writes data as a new sidecar for the language and returns its path. An
-// existing file is never overwritten; a numeric label is added instead.
-func Save(video, language string, data []byte) (string, error) {
+// existing file is never overwritten; a numeric label is added instead. When the
+// media folder is not writable the file goes to the fallback folder instead.
+func Save(t Target, language string, data []byte) (string, error) {
 	if !ValidLanguage(language) {
 		return "", fmt.Errorf("%w: language %q", ErrInvalid, language)
 	}
 	text := toUTF8(data)
-	dir := filepath.Dir(video)
+	path, err := saveIn(filepath.Dir(t.Video), t.Fallback, base(t.Video), language, text)
+	if err != nil && t.Fallback != "" && unwritable(err) {
+		if mkErr := os.MkdirAll(t.Fallback, 0o755); mkErr != nil {
+			return "", mkErr
+		}
+		return saveIn(t.Fallback, filepath.Dir(t.Video), base(t.Video), language, text)
+	}
+	return path, err
+}
+
+func unwritable(err error) bool {
+	return errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.EROFS)
+}
+
+// saveIn creates the first free numbered name in dir; other is a second folder
+// whose names are also avoided so a stored file never shadows a sidecar.
+func saveIn(dir, other, video, language, text string) (string, error) {
 	for n := 1; n < 100; n++ {
-		name := base(video) + "." + language
+		name := video + "." + language
 		if n > 1 {
 			name += fmt.Sprintf(".%d", n)
 		}
-		path := filepath.Join(dir, name+".srt")
+		name += ".srt"
+		if other != "" {
+			if _, err := os.Stat(filepath.Join(other, name)); err == nil {
+				continue
+			}
+		}
+		path := filepath.Join(dir, name)
 		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 		if errors.Is(err, os.ErrExist) {
 			continue
@@ -138,13 +203,18 @@ func Save(video, language string, data []byte) (string, error) {
 	return "", fmt.Errorf("%w: too many subtitle files", ErrInvalid)
 }
 
-// Remove deletes one sidecar by file name. The name must be a subtitle that
-// belongs to video, so this cannot remove arbitrary files.
-func Remove(video, file string) error {
-	if file != filepath.Base(file) || !strings.HasPrefix(file, base(video)+".") || !formats[strings.ToLower(filepath.Ext(file))] {
+// Remove deletes one sidecar by file name, from the media folder or else the
+// fallback folder. The name must be a subtitle that belongs to the video, so
+// this cannot remove arbitrary files.
+func Remove(t Target, file string) error {
+	if file != filepath.Base(file) || !strings.HasPrefix(file, base(t.Video)+".") || !formats[strings.ToLower(filepath.Ext(file))] {
 		return fmt.Errorf("%w: file %q", ErrInvalid, file)
 	}
-	return os.Remove(filepath.Join(filepath.Dir(video), file))
+	err := os.Remove(filepath.Join(filepath.Dir(t.Video), file))
+	if errors.Is(err, os.ErrNotExist) && t.Fallback != "" {
+		return os.Remove(filepath.Join(t.Fallback, file))
+	}
+	return err
 }
 
 // toUTF8 strips a byte order mark and reinterprets non-UTF-8 text as Latin-1,

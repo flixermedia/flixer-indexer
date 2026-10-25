@@ -23,6 +23,7 @@ import (
 	"github.com/flixermedia/flixer-indexer/internal/providers"
 	"github.com/flixermedia/flixer-indexer/internal/providers/registry"
 	"github.com/flixermedia/flixer-indexer/internal/scanner"
+	"github.com/flixermedia/flixer-indexer/internal/trickplay"
 )
 
 // handleScan walks a library and queues an identify task per item.
@@ -34,6 +35,9 @@ func (p *Pipeline) handleScan(ctx context.Context, t *asynq.Task) error {
 	lib, err := p.Library(ctx, req.LibraryID)
 	if err != nil {
 		return err
+	}
+	if req.TrickplayOnly {
+		return p.handleTrickplayScan(ctx, lib)
 	}
 	if err := p.Progress.Start(ctx, lib.ID); err != nil {
 		return err
@@ -65,6 +69,37 @@ func (p *Pipeline) handleScan(ctx context.Context, t *asynq.Task) error {
 }
 
 // handleRefresh re-describes a single path and runs it through the pipeline.
+func (p *Pipeline) handleTrickplayScan(ctx context.Context, lib models.Library) error {
+	p.Log.Info("trickplay backfill started", "library", lib.ID, "name", lib.Name)
+	return scanner.Scan(ctx, lib, func(w models.Work) error {
+		item := w.Item
+		if (item.Type != models.ItemMovie && item.Type != models.ItemEpisode && item.Type != models.ItemVideo) || item.RootID == "" || item.RelativePath == "" {
+			return nil
+		}
+		task := trickplay.Task{LibraryID: item.LibraryID, Path: item.Path, RootID: item.RootID, RelativePath: item.RelativePath}
+		_, err := p.Enqueue(ctx, config.QueueTrickplay, TypeTrickplay, task, 1)
+		if err != nil {
+			p.Log.Warn("could not queue trickplay during backfill", "library", lib.ID, "error", err)
+		}
+		return nil
+	})
+}
+
+func (p *Pipeline) handleTrickplay(ctx context.Context, t *asynq.Task) error {
+	if p.Trickplay == nil {
+		return fmt.Errorf("trickplay generator is unavailable: %w", asynq.SkipRetry)
+	}
+	var task trickplay.Task
+	if err := json.Unmarshal(t.Payload(), &task); err != nil || task.Path == "" || task.RootID == "" || task.RelativePath == "" {
+		return fmt.Errorf("bad trickplay payload: %w", asynq.SkipRetry)
+	}
+	if err := p.Trickplay.Generate(ctx, task); err != nil {
+		p.Log.Warn("trickplay generation failed", "library", task.LibraryID, "error", err)
+		return err
+	}
+	return nil
+}
+
 func (p *Pipeline) handleRefresh(ctx context.Context, t *asynq.Task) error {
 	var req models.RefreshRequest
 	if err := json.Unmarshal(t.Payload(), &req); err != nil {
@@ -73,6 +108,19 @@ func (p *Pipeline) handleRefresh(ctx context.Context, t *asynq.Task) error {
 	lib, err := p.Library(ctx, req.LibraryID)
 	if err != nil {
 		return err
+	}
+	switch req.ItemType {
+	case models.ItemSeries, models.ItemSeason, models.ItemAlbum:
+		// A container refresh re-indexes every item beneath it.
+		err := scanner.ScanBranch(ctx, lib, req.Path, func(w models.Work) error {
+			w.Force, w.Untracked = true, true
+			_, err := p.Enqueue(ctx, config.QueueIdentify, TypeIdentify, w, maxRetry)
+			return err
+		})
+		if err != nil {
+			return fmt.Errorf("%w: %w", err, asynq.SkipRetry)
+		}
+		return nil
 	}
 	w, err := scanner.Describe(ctx, lib, req.Path, req.ItemType)
 	if err != nil {
@@ -494,6 +542,12 @@ func (p *Pipeline) handleProbe(ctx context.Context, t *asynq.Task) error {
 			return fmt.Errorf("%w: %w", err, asynq.SkipRetry)
 		}
 		return err
+	}
+	if p.TrickplayEnabled && (item.Type == models.ItemMovie || item.Type == models.ItemEpisode || item.Type == models.ItemVideo) && item.RootID != "" && item.RelativePath != "" {
+		task := trickplay.Task{LibraryID: item.LibraryID, Path: item.Path, RootID: item.RootID, RelativePath: item.RelativePath}
+		if _, enqueueErr := p.Enqueue(ctx, config.QueueTrickplay, TypeTrickplay, task, 1); enqueueErr != nil {
+			p.Log.Warn("could not queue trickplay", "library", item.LibraryID, "error", enqueueErr)
+		}
 	}
 	if !w.Untracked {
 		if err := p.Progress.Done(ctx, item.LibraryID); err != nil {

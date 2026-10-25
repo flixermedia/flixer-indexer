@@ -22,16 +22,18 @@ import (
 	"github.com/flixermedia/flixer-indexer/internal/probe"
 	"github.com/flixermedia/flixer-indexer/internal/progress"
 	"github.com/flixermedia/flixer-indexer/internal/providers/registry"
+	"github.com/flixermedia/flixer-indexer/internal/trickplay"
 )
 
 // Task types, one per stage.
 const (
-	TypeScan     = "scan:library"
-	TypeIdentify = "identify:item"
-	TypeMetadata = "metadata:fetch"
-	TypeImages   = "images:fetch"
-	TypeProbe    = "probe:item"
-	TypeRefresh  = "refresh:item"
+	TypeScan      = "scan:library"
+	TypeIdentify  = "identify:item"
+	TypeMetadata  = "metadata:fetch"
+	TypeImages    = "images:fetch"
+	TypeProbe     = "probe:item"
+	TypeRefresh   = "refresh:item"
+	TypeTrickplay = "trickplay:item"
 )
 
 const (
@@ -51,10 +53,14 @@ type Pipeline struct {
 	Images *images.Store
 	Probe  Prober
 	// Lyrics downloads missing .lrc files; nil keeps lyrics local-only.
-	Lyrics   *lyrics.Fetcher
-	Progress *progress.Tracker
-	Queue    *asynq.Client
-	Log      *slog.Logger
+	Lyrics           *lyrics.Fetcher
+	Progress         *progress.Tracker
+	Queue            *asynq.Client
+	Log              *slog.Logger
+	Trickplay        *trickplay.Generator
+	TrickplayEnabled bool
+	// SubtitleDir stores subtitles for videos whose media folder is read-only.
+	SubtitleDir string
 
 	subs           atomic.Pointer[subtitleState]
 	subtitleMisses sync.Map // video path -> time of the last fruitless search
@@ -73,6 +79,11 @@ func New(client flixerclient.API, store *images.Store, prober Prober, tracker *p
 
 // SetRegistry swaps the provider set; running tasks keep the one they started with.
 func (p *Pipeline) SetRegistry(r *registry.Registry) { p.registry.Store(r) }
+
+func (p *Pipeline) SetTrickplay(enabled bool, directory, ffmpeg string, interval, width int) {
+	p.TrickplayEnabled = enabled
+	p.Trickplay = &trickplay.Generator{Directory: directory, FFmpeg: ffmpeg, Interval: interval, Width: width, Prober: p.Probe}
+}
 
 // Registry returns the provider set currently in use, or nil before the first load.
 func (p *Pipeline) Registry() *registry.Registry { return p.registry.Load() }
@@ -126,6 +137,8 @@ func queueTimeout(queue string) time.Duration {
 		return 12 * time.Hour
 	case config.QueueProbe:
 		return 3 * time.Minute
+	case config.QueueTrickplay:
+		return 3 * time.Hour
 	default:
 		return 5 * time.Minute
 	}
@@ -159,12 +172,13 @@ func (p *Pipeline) StartRefresh(ctx context.Context, req models.RefreshRequest) 
 // Handlers maps each queue to the handler for its task type.
 func (p *Pipeline) Handlers() map[string]map[string]asynq.HandlerFunc {
 	return map[string]map[string]asynq.HandlerFunc{
-		config.QueueScan:     {TypeScan: p.handleScan},
-		config.QueueIdentify: {TypeIdentify: p.handleIdentify},
-		config.QueueMetadata: {TypeMetadata: p.handleMetadata},
-		config.QueueImages:   {TypeImages: p.handleImages},
-		config.QueueProbe:    {TypeProbe: p.handleProbe},
-		config.QueueRefresh:  {TypeRefresh: p.handleRefresh},
+		config.QueueScan:      {TypeScan: p.handleScan},
+		config.QueueIdentify:  {TypeIdentify: p.handleIdentify},
+		config.QueueMetadata:  {TypeMetadata: p.handleMetadata},
+		config.QueueImages:    {TypeImages: p.handleImages},
+		config.QueueProbe:     {TypeProbe: p.handleProbe},
+		config.QueueRefresh:   {TypeRefresh: p.handleRefresh},
+		config.QueueTrickplay: {TypeTrickplay: p.handleTrickplay},
 	}
 }
 
@@ -179,7 +193,7 @@ func (p *Pipeline) OnError(ctx context.Context, task *asynq.Task, err error) {
 		level = slog.LevelError
 	}
 	p.Log.Log(ctx, level, "task failed", "type", task.Type(), "retry", retried, "terminal", terminal, "error", err)
-	if !terminal || task.Type() == TypeScan || task.Type() == TypeRefresh {
+	if !terminal || task.Type() == TypeScan || task.Type() == TypeRefresh || task.Type() == TypeTrickplay {
 		return
 	}
 	var w models.Work

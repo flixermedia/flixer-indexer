@@ -32,6 +32,8 @@ var (
 	ErrQuota = errors.New("opensubtitles quota reached")
 	// ErrNotFound means nothing matched.
 	ErrNotFound = errors.New("no subtitles found")
+	// ErrCredentials means downloading needs an OpenSubtitles account that is missing or rejected.
+	ErrCredentials = errors.New("opensubtitles credentials missing or rejected")
 )
 
 // Client talks to the OpenSubtitles REST API. Searching needs only an API key;
@@ -129,7 +131,7 @@ func (c *Client) do(ctx context.Context, method, endpoint string, body any, out 
 		c.block()
 		return resp, ErrQuota
 	case resp.StatusCode < 200 || resp.StatusCode > 299:
-		return resp, fmt.Errorf("opensubtitles: unexpected status %d", resp.StatusCode)
+		return resp, fmt.Errorf("opensubtitles: %s %s returned status %d", method, endpoint, resp.StatusCode)
 	}
 	if out != nil {
 		return resp, json.NewDecoder(io.LimitReader(resp.Body, maxJSON)).Decode(out)
@@ -167,14 +169,17 @@ func (c *Client) login(ctx context.Context) error {
 		return nil
 	}
 	if c.Username == "" || c.Password == "" {
-		return errors.New("opensubtitles: OPENSUBTITLES_USERNAME and OPENSUBTITLES_PASSWORD are required to download")
+		return fmt.Errorf("%w: OPENSUBTITLES_USERNAME and OPENSUBTITLES_PASSWORD are required to download", ErrCredentials)
 	}
 	var out struct {
 		Token   string `json:"token"`
 		BaseURL string `json:"base_url"`
 	}
-	_, err := c.do(ctx, http.MethodPost, strings.TrimRight(c.BaseURL, "/")+"/login", map[string]string{"username": c.Username, "password": c.Password}, &out)
+	resp, err := c.do(ctx, http.MethodPost, strings.TrimRight(c.BaseURL, "/")+"/login", map[string]string{"username": c.Username, "password": c.Password}, &out)
 	if err != nil {
+		if resp != nil && (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusBadRequest) {
+			return fmt.Errorf("%w: login returned status %d", ErrCredentials, resp.StatusCode)
+		}
 		return err
 	}
 	if out.Token == "" {
@@ -328,7 +333,7 @@ func (c *Client) Download(ctx context.Context, fileID int) ([]byte, error) {
 }
 
 // Fetch downloads the best subtitle for one language and stores it beside the video.
-func (c *Client) Fetch(ctx context.Context, video string, q Query, language string) (string, error) {
+func (c *Client) Fetch(ctx context.Context, target Target, q Query, language string) (string, error) {
 	q.Languages = []string{language}
 	results, err := c.Search(ctx, q)
 	if err != nil {
@@ -341,7 +346,7 @@ func (c *Client) Fetch(ctx context.Context, video string, q Query, language stri
 	if err != nil {
 		return "", err
 	}
-	return Save(video, language, data)
+	return Save(target, language, data)
 }
 
 // Hash computes the OpenSubtitles movie hash: the file size plus the 64-bit

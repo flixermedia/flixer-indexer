@@ -47,6 +47,31 @@ func Scan(ctx context.Context, lib models.Library, emit Emit) error {
 	return nil
 }
 
+// ScanBranch emits the item at path and everything beneath it, such as a series with its seasons and episodes.
+func ScanBranch(ctx context.Context, lib models.Library, path string, emit Emit) error {
+	found := false
+	capture := func(w models.Work) error {
+		if !within(w.Item.Path, path) {
+			return nil
+		}
+		found = true
+		return emit(w)
+	}
+	for _, f := range lib.Folders {
+		if f.AbsolutePath == "" || !within(path, f.AbsolutePath) {
+			continue
+		}
+		s := &scan{ctx: ctx, lib: lib, folder: f, emit: capture, target: path}
+		if err := s.run(); err != nil {
+			return err
+		}
+	}
+	if !found {
+		return fmt.Errorf("nothing found at %s in library %s", path, lib.ID)
+	}
+	return nil
+}
+
 // Describe builds the work item for a single known path and type.
 func Describe(ctx context.Context, lib models.Library, path, itemType string) (models.Work, error) {
 	var found models.Work

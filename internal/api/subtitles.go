@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/flixermedia/flixer-indexer/internal/models"
 	"github.com/flixermedia/flixer-indexer/internal/pipeline"
@@ -15,6 +16,8 @@ import (
 // subtitleRequest identifies a video and, depending on the endpoint, what to do with it.
 type subtitleRequest struct {
 	Path              string            `json:"path"`
+	RootID            string            `json:"rootId,omitempty"`
+	RelativePath      string            `json:"relativePath,omitempty"`
 	Type              string            `json:"type,omitempty"`
 	Title             string            `json:"title,omitempty"`
 	SeriesTitle       string            `json:"seriesTitle,omitempty"`
@@ -65,10 +68,19 @@ func (s *Server) videoPath(w http.ResponseWriter, r *http.Request, path string) 
 	return real, true
 }
 
+func (s *Server) target(req subtitleRequest, path string) subtitles.Target {
+	return subtitles.Target{Video: path, Fallback: subtitles.FallbackDir(s.Pipeline.SubtitleDir, req.RootID, req.RelativePath)}
+}
+
 func (s *Server) subtitleFailure(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, subtitles.ErrNotConfigured):
 		writeError(w, http.StatusServiceUnavailable, "OpenSubtitles is not configured on the indexer")
+	case errors.Is(err, subtitles.ErrCredentials):
+		writeError(w, http.StatusFailedDependency, "Downloading subtitles needs valid OpenSubtitles username and password on the indexer")
+	case errors.Is(err, os.ErrPermission), errors.Is(err, syscall.EROFS):
+		s.Log.Warn("subtitle folder is not writable", "error", err)
+		writeError(w, http.StatusFailedDependency, "the media folder is not writable by the indexer")
 	case errors.Is(err, subtitles.ErrQuota):
 		writeError(w, http.StatusTooManyRequests, "OpenSubtitles download quota reached; try again later")
 	case errors.Is(err, subtitles.ErrNotFound):
@@ -91,7 +103,7 @@ func (s *Server) subtitleList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	client, _, _ := s.Pipeline.SubtitleConfig()
-	tracks, err := subtitles.List(path)
+	tracks, err := subtitles.List(s.target(req, path))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not read the media folder")
 		return
@@ -168,7 +180,7 @@ func (s *Server) subtitleDownload(w http.ResponseWriter, r *http.Request) {
 		s.subtitleFailure(w, err)
 		return
 	}
-	saved, err := subtitles.Save(path, req.Language, data)
+	saved, err := subtitles.Save(s.target(req, path), req.Language, data)
 	if err != nil {
 		s.subtitleFailure(w, err)
 		return
@@ -185,7 +197,7 @@ func (s *Server) subtitleDelete(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := subtitles.Remove(path, req.File); err != nil {
+	if err := subtitles.Remove(s.target(req, path), req.File); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			writeError(w, http.StatusNotFound, "subtitle not found")
 			return

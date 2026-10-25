@@ -120,6 +120,8 @@ func run() error {
 	tracker := progress.New(rdb)
 	store := images.NewStore(cfg.CachePath, cfg.FFmpegPath, cfg.UserAgent)
 	pipe := pipeline.New(client, store, probe.New(cfg.FFprobePath), tracker, queue, log)
+	pipe.SubtitleDir = cfg.SubtitleDir
+	pipe.SetTrickplay(cfg.TrickplayEnabled, cfg.TrickplayDir, cfg.FFmpegPath, cfg.TrickplayInterval, cfg.TrickplayWidth)
 
 	if cfg.LyricsFetch {
 		pipe.Lyrics = lyrics.NewFetcher(cfg.UserAgent)

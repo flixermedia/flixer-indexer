@@ -4,7 +4,7 @@ Go service that scans flixer's media libraries, identifies items, fetches metada
 
 ## Pipeline
 
-`scan:library` → `identify:item` → `metadata:fetch` → `images:fetch` → `probe:item` (finalizes and upserts to flixer). `refresh:item` re-processes a single path.
+`scan:library` → `identify:item` → `metadata:fetch` → `images:fetch` → `probe:item` (finalizes and upserts to flixer). `trickplay:item` builds hover-seek thumbnail sheets after a successful video upsert. `refresh:item` re-processes a single path.
 
 Each stage is an Asynq queue (Redis) with its own worker pool; concurrency can be changed at runtime from flixer.
 
@@ -25,9 +25,13 @@ Requires Redis, and `ffprobe`/`ffmpeg` on PATH (or `FFPROBE_PATH`/`FFMPEG_PATH`)
 | `PORT` | 8092 | |
 | `ROLE` | all | `all`, `api` or `worker` |
 | `FLIXER_URL` | http://localhost:8083 | alias `FLIXER_INTERNAL_URL`. At startup the indexer also asks flixer whether Sentry is enabled (toggle it in the admin dashboard); if flixer is unreachable it starts with Sentry off |
-| `STREAM_TOKEN_SECRET` | — | shared HMAC secret (falls back to `JWT_SECRET`) |
+| `APP_SECRET` | — | shared HMAC secret (falls back to `JWT_SECRET`) |
 | `REDIS_ADDR` | localhost:6379 | |
-| `CACHE_PATH` | ./cache/metadata | |
+| `CACHE_PATH` | ./cache/metadata | Artwork cache; the default trickplay directory is `<CACHE_PATH>/trickplay` |
+| `TRICKPLAY_ENABLED` | true | Automatically queue hover-seek sheets for movies, episodes and videos after indexing |
+| `TRICKPLAY_DIR` | `<CACHE_PATH>/trickplay` | Shared thumbnail cache; mount read-only into the streamer |
+| `TRICKPLAY_INTERVAL` | 10 | Thumbnail spacing in seconds (2–60) |
+| `TRICKPLAY_WIDTH` | 320 | Thumbnail width in pixels (80–640); generated height preserves aspect ratio |
 | `WATCH_FOLDERS` | true | watch library folders and auto-scan after changes settle |
 | `WATCH_DEBOUNCE` | 30s | quiet time before an auto-scan is queued |
 | `WATCH_RESCAN_INTERVAL` | 0 (off) | periodic scan for SMB/NFS mounts that emit no file events, e.g. `15m` |
@@ -45,7 +49,7 @@ services:
     build: ../flixer-indexer
     environment:
       FLIXER_URL: http://flixer:8083
-      STREAM_TOKEN_SECRET: ${STREAM_TOKEN_SECRET}
+      APP_SECRET: ${APP_SECRET}
       REDIS_ADDR: redis:6379
     volumes:
       - ${STREAM_MEDIA_ROOT}:/media
@@ -58,7 +62,7 @@ volumes:
 ## Auth
 
 Requests in both directions carry `X-Indexer-Timestamp` and `X-Indexer-Signature` = hex HMAC-SHA256 of
-`flixer-indexer:v1:<ts>:<METHOD>:<path>:<sha256(body)>` with `STREAM_TOKEN_SECRET` (±5 min skew). `/health` is open.
+`flixer-indexer:v1:<ts>:<METHOD>:<path>:<sha256(body)>` with `APP_SECRET` (±5 min skew). `/health` is open.
 
 ## flixer contract (to be implemented in flixer)
 
@@ -67,6 +71,8 @@ Requests in both directions carry `X-Indexer-Timestamp` and `X-Indexer-Signature
 - `POST /api/indexer/media/items` → `{id}` (4xx other than 429 is treated as permanent)
 
 Hierarchy and identity: every item has `externalKey` (e.g. `tmdb:100:s1:e2`, or `path:<path>` if unidentified) and `parentExternalKey` (series → season → episode). Upsert by `externalKey`, link parents through it (creating a placeholder parent if it hasn't arrived yet), and fall back to `parentProviderIds` / `parentPath` to match a series identified under a different provider. A renamed folder then keeps the same row.
+
+A trickplay-only backfill can be queued with `POST /internal/scan` and `{"libraryId":"…","trickplayOnly":true}`. It scans video items without changing scan progress or pruning; already-current source files are skipped by the worker.
 
 ## Internal API
 

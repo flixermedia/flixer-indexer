@@ -164,3 +164,33 @@ func TestMixed(t *testing.T) {
 		t.Fatalf("items: %+v", ws)
 	}
 }
+
+func TestScanBranch(t *testing.T) {
+	root := t.TempDir()
+	touch(t, root,
+		"Show (2020)/Season 1/Show S01E01.mkv",
+		"Show (2020)/Season 2/Show S02E01.mkv",
+		"Other (2021)/Season 1/Other S01E01.mkv")
+	l := lib(models.LibraryTVShows, root)
+	var got []models.Work
+	collectInto := func(w models.Work) error { got = append(got, w); return nil }
+
+	if err := ScanBranch(context.Background(), l, filepath.Join(root, "Show (2020)"), collectInto); err != nil {
+		t.Fatal(err)
+	}
+	if count(got, models.ItemSeries) != 1 || count(got, models.ItemSeason) != 2 || count(got, models.ItemEpisode) != 2 {
+		t.Fatalf("series branch = %d items", len(got))
+	}
+
+	got = nil
+	if err := ScanBranch(context.Background(), l, filepath.Join(root, "Show (2020)", "Season 2"), collectInto); err != nil {
+		t.Fatal(err)
+	}
+	if count(got, models.ItemSeason) != 1 || count(got, models.ItemEpisode) != 1 || count(got, models.ItemSeries) != 0 {
+		t.Fatalf("season branch = %d items", len(got))
+	}
+
+	if err := ScanBranch(context.Background(), l, filepath.Join(root, "Missing"), collectInto); err == nil {
+		t.Error("expected an error for a path with no items")
+	}
+}

@@ -22,7 +22,7 @@ services:
             PORT: 8092
             ROLE: ${INDEXER_ROLE:-all}
             FLIXER_URL: ${FLIXER_URL:-http://flixer:8083}
-            STREAM_TOKEN_SECRET: ${STREAM_TOKEN_SECRET:?set STREAM_TOKEN_SECRET}
+            APP_SECRET: ${APP_SECRET:?set APP_SECRET}
             REDIS_ADDR: redis:6379
             LOG_LEVEL: ${INDEXER_LOG_LEVEL:-info}
             METADATA_LANGUAGE: ${METADATA_LANGUAGE:-en}

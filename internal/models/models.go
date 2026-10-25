@@ -136,20 +136,28 @@ type Image struct {
 
 // Technical is the ffprobe-derived description of a media file.
 type Technical struct {
-	Container         string   `json:"container,omitempty"`
-	Duration          float64  `json:"duration,omitempty"` // seconds
-	Bitrate           int64    `json:"bitrate,omitempty"`
-	VideoCodec        string   `json:"videoCodec,omitempty"`
-	AudioCodec        string   `json:"audioCodec,omitempty"`
-	Width             int      `json:"width,omitempty"`
-	Height            int      `json:"height,omitempty"`
-	FrameRate         float64  `json:"frameRate,omitempty"`
-	HDR               string   `json:"hdr,omitempty"`
-	AudioChannels     int      `json:"audioChannels,omitempty"`
-	BitDepth          int      `json:"bitDepth,omitempty"`
-	SampleRate        int      `json:"sampleRate,omitempty"`
-	AudioLanguages    []string `json:"audioLanguages,omitempty"`
-	SubtitleLanguages []string `json:"subtitleLanguages,omitempty"`
+	Container         string    `json:"container,omitempty"`
+	Duration          float64   `json:"duration,omitempty"` // seconds
+	Bitrate           int64     `json:"bitrate,omitempty"`
+	VideoCodec        string    `json:"videoCodec,omitempty"`
+	AudioCodec        string    `json:"audioCodec,omitempty"`
+	Width             int       `json:"width,omitempty"`
+	Height            int       `json:"height,omitempty"`
+	FrameRate         float64   `json:"frameRate,omitempty"`
+	HDR               string    `json:"hdr,omitempty"`
+	AudioChannels     int       `json:"audioChannels,omitempty"`
+	BitDepth          int       `json:"bitDepth,omitempty"`
+	SampleRate        int       `json:"sampleRate,omitempty"`
+	AudioLanguages    []string  `json:"audioLanguages,omitempty"`
+	SubtitleLanguages []string  `json:"subtitleLanguages,omitempty"`
+	Chapters          []Chapter `json:"chapters,omitempty"`
+}
+
+// Chapter is a named span of a video, in seconds, from the container's chapter list.
+type Chapter struct {
+	Title string  `json:"title"`
+	Start float64 `json:"start"`
+	End   float64 `json:"end"`
 }
 
 // Item is what the indexer persists through flixer.
@@ -205,8 +213,9 @@ type Work struct {
 
 // ScanRequest starts a scan of a library.
 type ScanRequest struct {
-	LibraryID string `json:"libraryId"`
-	Force     bool   `json:"force,omitempty"`
+	LibraryID     string `json:"libraryId"`
+	Force         bool   `json:"force,omitempty"`
+	TrickplayOnly bool   `json:"trickplayOnly,omitempty"`
 }
 
 // RefreshRequest re-runs the pipeline for one item.

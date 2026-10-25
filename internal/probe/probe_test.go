@@ -49,3 +49,21 @@ func TestParseAudioWithArt(t *testing.T) {
 		t.Errorf("tags = %v", res.Tags)
 	}
 }
+
+func TestParseChapters(t *testing.T) {
+	res, err := Parse([]byte(`{
+	  "format": {"format_name": "matroska,webm", "duration": "1400"},
+	  "streams": [],
+	  "chapters": [
+	    {"start_time": "0.000000", "end_time": "90.500000", "tags": {"title": " Intro "}},
+	    {"start_time": "90.5", "end_time": "90.5", "tags": {"title": "Empty"}},
+	    {"start_time": "90.5", "end_time": "1400", "tags": {}}
+	  ]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch := res.Technical.Chapters
+	if len(ch) != 2 || ch[0].Title != "Intro" || ch[0].End != 90.5 || ch[1].Title != "" || ch[1].Start != 90.5 {
+		t.Errorf("chapters = %+v", ch)
+	}
+}

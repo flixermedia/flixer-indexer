@@ -65,6 +65,8 @@ func (s *Server) Handler() http.Handler {
 	signed.HandleFunc("GET /internal/tasks", s.tasks)
 	signed.HandleFunc("POST /internal/tasks/{queue}/{id}/cancel", s.cancelTask)
 	signed.HandleFunc("POST /internal/tasks/{queue}/{id}/retry", s.retryTask)
+	signed.HandleFunc("POST /internal/queues/{queue}/cancel-active", s.cancelActive)
+	signed.HandleFunc("POST /internal/libraries/{id}/cancel-tasks", s.cancelLibraryTasks)
 	signed.HandleFunc("POST /internal/queues/{queue}/clear-failed", s.clearFailed)
 	signed.HandleFunc("POST /internal/queues/{queue}/pause", s.pause(true))
 	signed.HandleFunc("POST /internal/queues/{queue}/resume", s.pause(false))
@@ -365,6 +367,105 @@ func (s *Server) retryTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"retrying": id})
+}
+
+// cancelLibraryTasks cancels running tasks and deletes waiting ones that belong to a library.
+// Running tasks go first so a scan can't keep queueing work while the rest is removed.
+func (s *Server) cancelLibraryTasks(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "library id is required")
+		return
+	}
+	lists := []struct {
+		list   func(string, ...asynq.ListOption) ([]*asynq.TaskInfo, error)
+		active bool
+	}{
+		{s.Inspector.ListActiveTasks, true},
+		{s.Inspector.ListPendingTasks, false},
+		{s.Inspector.ListScheduledTasks, false},
+		{s.Inspector.ListRetryTasks, false},
+	}
+	cancelled := 0
+	for _, queue := range config.Queues {
+		for _, l := range lists {
+			tasks, err := l.list(queue, asynq.PageSize(100000))
+			if err != nil {
+				if errors.Is(err, asynq.ErrQueueNotFound) {
+					continue
+				}
+				writeError(w, http.StatusInternalServerError, "could not list tasks")
+				return
+			}
+			for _, t := range tasks {
+				if view(t).LibraryID != id {
+					continue
+				}
+				if l.active {
+					err = s.Inspector.CancelProcessing(t.ID)
+				} else {
+					err = s.Inspector.DeleteTask(queue, t.ID)
+				}
+				if err == nil {
+					cancelled++
+				}
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"libraryId": id, "cancelled": cancelled})
+}
+
+// deleteWaiting removes every pending, scheduled and retrying task in a queue.
+func (s *Server) deleteWaiting(queue string) (int, error) {
+	total := 0
+	for _, del := range []func(string) (int, error){
+		s.Inspector.DeleteAllPendingTasks, s.Inspector.DeleteAllScheduledTasks, s.Inspector.DeleteAllRetryTasks,
+	} {
+		n, err := del(queue)
+		if err != nil && !errors.Is(err, asynq.ErrQueueNotFound) {
+			return total, err
+		}
+		total += n
+	}
+	return total, nil
+}
+
+// cancelActive removes every pending task and cancels every running task in a queue.
+func (s *Server) cancelActive(w http.ResponseWriter, r *http.Request) {
+	queue := r.PathValue("queue")
+	if !slices.Contains(config.Queues, queue) {
+		writeError(w, http.StatusNotFound, "unknown queue")
+		return
+	}
+	// Waiting tasks go first so workers can't pick up new ones while we cancel.
+	waiting, err := s.deleteWaiting(queue)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not clear waiting tasks")
+		return
+	}
+	active, err := s.Inspector.ListActiveTasks(queue, asynq.PageSize(1000))
+	if err != nil && !errors.Is(err, asynq.ErrQueueNotFound) {
+		writeError(w, http.StatusInternalServerError, "could not list running tasks")
+		return
+	}
+	running := 0
+	for _, task := range active {
+		if s.Inspector.CancelProcessing(task.ID) == nil {
+			running++
+		}
+	}
+	if running > 0 {
+		// A cancelled task is handed back for retry, so sweep again once workers have let go of it.
+		time.Sleep(1500 * time.Millisecond)
+		again, err := s.deleteWaiting(queue)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "could not clear waiting tasks")
+			return
+		}
+		waiting += again
+	}
+	pending := waiting
+	writeJSON(w, http.StatusOK, map[string]any{"queue": queue, "cancelled": pending + running, "pending": pending, "running": running})
 }
 
 // clearFailed deletes every archived (permanently failed) task in a queue.

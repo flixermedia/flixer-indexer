@@ -37,7 +37,7 @@ func (p *Prober) Probe(ctx context.Context, file string) (*Result, error) {
 	ctx, cancel := context.WithTimeout(ctx, p.Timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, p.Path, "-v", "error", "-print_format", "json", "-show_format", "-show_streams", file)
+	cmd := exec.CommandContext(ctx, p.Path, "-v", "error", "-print_format", "json", "-show_format", "-show_streams", "-show_chapters", file)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {
@@ -75,6 +75,11 @@ type output struct {
 			Type string `json:"side_data_type"`
 		} `json:"side_data_list"`
 	} `json:"streams"`
+	Chapters []struct {
+		Start string            `json:"start_time"`
+		End   string            `json:"end_time"`
+		Tags  map[string]string `json:"tags"`
+	} `json:"chapters"`
 }
 
 var pixFmtDepth = regexp.MustCompile(`(?:p|^)(\d{2})(?:le|be)?$`)
@@ -132,6 +137,14 @@ func Parse(data []byte) (*Result, error) {
 				t.SubtitleLanguages = appendUnique(t.SubtitleLanguages, lang)
 			}
 		}
+	}
+	for _, c := range out.Chapters {
+		start, _ := strconv.ParseFloat(c.Start, 64)
+		end, _ := strconv.ParseFloat(c.End, 64)
+		if end <= start {
+			continue
+		}
+		t.Chapters = append(t.Chapters, models.Chapter{Title: strings.TrimSpace(c.Tags["title"]), Start: start, End: end})
 	}
 	return res, nil
 }

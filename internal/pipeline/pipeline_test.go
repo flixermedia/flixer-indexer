@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -114,5 +115,36 @@ func TestEndToEnd(t *testing.T) {
 	}
 	if ep := types[models.ItemEpisode]; ep.EpisodeNumber == nil || *ep.EpisodeNumber != 1 || ep.Metadata.Title == "" {
 		t.Errorf("episode = %+v", ep)
+	}
+}
+
+func TestTrickplayOnlyScanSkipsProgressAndUsesDistinctScanPayload(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "movie.mkv"), []byte("video"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lib := models.Library{ID: "lib", Type: models.LibraryMovies, Folders: []models.Folder{{RootID: "root", Path: "Movies", AbsolutePath: root}}}
+	mr := miniredis.RunT(t)
+	opt := asynq.RedisClientOpt{Addr: mr.Addr()}
+	queue := asynq.NewClient(opt)
+	defer queue.Close()
+	tracker := progress.New(redis.NewClient(&redis.Options{Addr: mr.Addr()}))
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	p := New(&fakeAPI{libs: []models.Library{lib}}, images.NewStore(t.TempDir(), "ffmpeg", "test"), fakeProbe{}, tracker, queue, logger)
+	payload, err := json.Marshal(models.ScanRequest{LibraryID: "lib", TrickplayOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.handleScan(context.Background(), asynq.NewTask(TypeScan, payload)); err != nil {
+		t.Fatal(err)
+	}
+	if scan, err := tracker.Get(context.Background(), "lib"); err != nil || scan != nil {
+		t.Fatalf("trickplay-only scan changed progress: scan=%+v err=%v", scan, err)
+	}
+	for _, req := range []models.ScanRequest{{LibraryID: "lib"}, {LibraryID: "lib", TrickplayOnly: true}} {
+		queued, err := p.StartScan(context.Background(), req)
+		if err != nil || !queued {
+			t.Fatalf("scan payload %+v queued=%v err=%v", req, queued, err)
+		}
 	}
 }

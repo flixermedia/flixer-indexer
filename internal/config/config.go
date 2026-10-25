@@ -14,16 +14,17 @@ import (
 
 // Queue names, shared by the pipeline, the pool and the API.
 const (
-	QueueScan     = "scan"
-	QueueIdentify = "identify"
-	QueueMetadata = "metadata"
-	QueueImages   = "images"
-	QueueProbe    = "probe"
-	QueueRefresh  = "refresh"
+	QueueScan      = "scan"
+	QueueIdentify  = "identify"
+	QueueMetadata  = "metadata"
+	QueueImages    = "images"
+	QueueProbe     = "probe"
+	QueueRefresh   = "refresh"
+	QueueTrickplay = "trickplay"
 )
 
 // Queues lists every queue in pipeline order.
-var Queues = []string{QueueScan, QueueIdentify, QueueMetadata, QueueImages, QueueProbe, QueueRefresh}
+var Queues = []string{QueueScan, QueueIdentify, QueueMetadata, QueueImages, QueueProbe, QueueRefresh, QueueTrickplay}
 
 // MaxConcurrency caps what an admin can set for a single queue.
 const MaxConcurrency = 64
@@ -49,13 +50,18 @@ type Config struct {
 	RedisDB    int
 	RedisTLS   bool
 	// RedisFromEnv is true when REDIS_ADDR is set; otherwise flixer supplies the Redis settings.
-	RedisFromEnv bool
-	CachePath    string
-	LogDir       string
-	FFprobePath  string
-	FFmpegPath   string
-	Concurrency  map[string]int
-	LogLevel     slog.Level
+	RedisFromEnv      bool
+	CachePath         string
+	LogDir            string
+	FFprobePath       string
+	FFmpegPath        string
+	TrickplayEnabled  bool
+	TrickplayDir      string
+	SubtitleDir       string
+	TrickplayInterval int
+	TrickplayWidth    int
+	Concurrency       map[string]int
+	LogLevel          slog.Level
 	// ProviderKeys seed provider keys from the environment; flixer's values win.
 	ProviderKeys map[string]string
 	UserAgent    string
@@ -91,10 +97,10 @@ func ReadSecretFile(path string, wait time.Duration) (string, error) {
 			return strings.TrimSpace(string(data)), nil
 		}
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
-			return "", fmt.Errorf("read STREAM_TOKEN_SECRET_FILE: %w", err)
+			return "", fmt.Errorf("read APP_SECRET_FILE: %w", err)
 		}
 		if time.Now().After(deadline) {
-			return "", fmt.Errorf("STREAM_TOKEN_SECRET_FILE %s was not published by flixer in time", path)
+			return "", fmt.Errorf("APP_SECRET_FILE %s was not published by flixer in time", path)
 		}
 		time.Sleep(time.Second)
 	}
@@ -115,19 +121,19 @@ func Load() (Config, error) {
 		return Config{}, errors.New("ROLE must be all, api or worker")
 	}
 
-	secret := strings.TrimSpace(os.Getenv("STREAM_TOKEN_SECRET"))
+	secret := strings.TrimSpace(legacyEnv("APP_SECRET", "STREAM_TOKEN_SECRET"))
 	if secret == "" {
 		secret = strings.TrimSpace(os.Getenv("JWT_SECRET"))
 	}
 	if secret == "" {
-		fromFile, err := ReadSecretFile(os.Getenv("STREAM_TOKEN_SECRET_FILE"), secretFileWait)
+		fromFile, err := ReadSecretFile(legacyEnv("APP_SECRET_FILE", "STREAM_TOKEN_SECRET_FILE"), secretFileWait)
 		if err != nil {
 			return Config{}, err
 		}
 		secret = fromFile
 	}
 	if len([]byte(secret)) < 32 {
-		return Config{}, errors.New("STREAM_TOKEN_SECRET, STREAM_TOKEN_SECRET_FILE or JWT_SECRET must contain at least 32 bytes")
+		return Config{}, errors.New("APP_SECRET, APP_SECRET_FILE or JWT_SECRET must contain at least 32 bytes")
 	}
 
 	level, err := parseLogLevel(envOrDefault("LOG_LEVEL", "info"))
@@ -142,7 +148,7 @@ func Load() (Config, error) {
 
 	defaults := map[string]int{
 		QueueScan: 2, QueueIdentify: 12, QueueMetadata: 12,
-		QueueImages: 8, QueueProbe: 6, QueueRefresh: 4,
+		QueueImages: 8, QueueProbe: 6, QueueRefresh: 4, QueueTrickplay: 1,
 	}
 	concurrency := make(map[string]int, len(defaults))
 	for queue, fallback := range defaults {
@@ -152,6 +158,19 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("%s must be an integer from 1 to %d", key, MaxConcurrency)
 		}
 		concurrency[queue] = n
+	}
+
+	trickplayEnabled, err := strconv.ParseBool(envOrDefault("TRICKPLAY_ENABLED", "true"))
+	if err != nil {
+		return Config{}, errors.New("TRICKPLAY_ENABLED must be true or false")
+	}
+	trickplayInterval, err := strconv.Atoi(envOrDefault("TRICKPLAY_INTERVAL", "10"))
+	if err != nil || trickplayInterval < 2 || trickplayInterval > 60 {
+		return Config{}, errors.New("TRICKPLAY_INTERVAL must be an integer from 2 to 60")
+	}
+	trickplayWidth, err := strconv.Atoi(envOrDefault("TRICKPLAY_WIDTH", "320"))
+	if err != nil || trickplayWidth < 80 || trickplayWidth > 640 {
+		return Config{}, errors.New("TRICKPLAY_WIDTH must be an integer from 80 to 640")
 	}
 
 	ffprobe := envOrDefault("FFPROBE_PATH", "ffprobe")
@@ -189,29 +208,34 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	return Config{
-		Port:         port,
-		Role:         role,
-		FlixerURL:    strings.TrimRight(flixerURL, "/"),
-		Secret:       []byte(secret),
-		Stub:         strings.EqualFold(os.Getenv("FLIXER_MODE"), "stub"),
-		StubLibs:     os.Getenv("STUB_LIBRARIES_FILE"),
-		StubOutput:   envOrDefault("STUB_OUTPUT_FILE", "./cache/stub-items.jsonl"),
-		RedisAddr:    envOrDefault("REDIS_ADDR", "localhost:6379"),
-		RedisUser:    os.Getenv("REDIS_USERNAME"),
-		RedisPass:    os.Getenv("REDIS_PASSWORD"),
-		RedisDB:      redisDB,
-		RedisTLS:     strings.EqualFold(os.Getenv("REDIS_TLS"), "true"),
-		RedisFromEnv: strings.TrimSpace(os.Getenv("REDIS_ADDR")) != "",
-		CachePath:    cachePath,
-		LogDir:       logDir,
-		FFprobePath:  ffprobe,
-		FFmpegPath:   envOrDefault("FFMPEG_PATH", "ffmpeg"),
-		Concurrency:  concurrency,
-		LogLevel:     level,
-		ProviderKeys: keys,
-		UserAgent:    envOrDefault("USER_AGENT", "flixer-indexer/1.0 (+https://github.com/flixermedia/flixer-indexer)"),
-		Language:     envOrDefault("METADATA_LANGUAGE", "en"),
-		LyricsFetch:  !strings.EqualFold(strings.TrimSpace(os.Getenv("LYRICS_FETCH")), "false"),
+		Port:              port,
+		Role:              role,
+		FlixerURL:         strings.TrimRight(flixerURL, "/"),
+		Secret:            []byte(secret),
+		Stub:              strings.EqualFold(os.Getenv("FLIXER_MODE"), "stub"),
+		StubLibs:          os.Getenv("STUB_LIBRARIES_FILE"),
+		StubOutput:        envOrDefault("STUB_OUTPUT_FILE", "./cache/stub-items.jsonl"),
+		RedisAddr:         envOrDefault("REDIS_ADDR", "localhost:6379"),
+		RedisUser:         os.Getenv("REDIS_USERNAME"),
+		RedisPass:         os.Getenv("REDIS_PASSWORD"),
+		RedisDB:           redisDB,
+		RedisTLS:          strings.EqualFold(os.Getenv("REDIS_TLS"), "true"),
+		RedisFromEnv:      strings.TrimSpace(os.Getenv("REDIS_ADDR")) != "",
+		CachePath:         cachePath,
+		LogDir:            logDir,
+		FFprobePath:       ffprobe,
+		FFmpegPath:        envOrDefault("FFMPEG_PATH", "ffmpeg"),
+		TrickplayEnabled:  trickplayEnabled,
+		TrickplayDir:      filepath.Clean(envOrDefault("TRICKPLAY_DIR", filepath.Join(cachePath, "trickplay"))),
+		SubtitleDir:       filepath.Clean(envOrDefault("SUBTITLE_DIR", filepath.Join(cachePath, "subtitles"))),
+		TrickplayInterval: trickplayInterval,
+		TrickplayWidth:    trickplayWidth,
+		Concurrency:       concurrency,
+		LogLevel:          level,
+		ProviderKeys:      keys,
+		UserAgent:         envOrDefault("USER_AGENT", "flixer-indexer/1.0 (+https://github.com/flixermedia/flixer-indexer)"),
+		Language:          envOrDefault("METADATA_LANGUAGE", "en"),
+		LyricsFetch:       !strings.EqualFold(strings.TrimSpace(os.Getenv("LYRICS_FETCH")), "false"),
 
 		OpenSubtitlesKey:      strings.TrimSpace(os.Getenv("OPENSUBTITLES_API_KEY")),
 		OpenSubtitlesUser:     strings.TrimSpace(os.Getenv("OPENSUBTITLES_USERNAME")),
@@ -312,4 +336,12 @@ func envOrDefault(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+// legacyEnv reads name, falling back to the variable it replaced so existing deployments keep working.
+func legacyEnv(name, legacy string) string {
+	if value := os.Getenv(name); value != "" {
+		return value
+	}
+	return os.Getenv(legacy)
 }

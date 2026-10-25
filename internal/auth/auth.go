@@ -5,7 +5,7 @@
 //
 //	flixer-indexer:v1:<timestamp>:<METHOD>:<path>:<hex sha256 of body>
 //
-// keyed with the shared STREAM_TOKEN_SECRET. The same scheme is used in both
+// keyed with the shared APP_SECRET. The same scheme is used in both
 // directions, so the secret never travels and a captured request cannot be
 // replayed against another path or with another body.
 package auth
