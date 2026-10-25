@@ -14,8 +14,8 @@ FROM alpine:3.22 AS runtime
 ARG APP_VERSION=dev
 RUN apk add --no-cache ca-certificates curl ffmpeg \
     && adduser -D -H -u 65532 indexer \
-    && mkdir -p /var/cache/flixer/indexer \
-    && chown -R indexer:indexer /var/cache/flixer
+    && mkdir -p /data/cache \
+    && chown -R indexer:indexer /data/cache
 
 COPY --from=build /out/flixer-indexer /usr/local/bin/flixer-indexer
 
@@ -23,7 +23,7 @@ ENV APP_VERSION=${APP_VERSION} \
     PORT=8092 \
     FFMPEG_PATH=ffmpeg \
     FFPROBE_PATH=ffprobe \
-    CACHE_PATH=/var/cache/flixer/indexer
+    CACHE_PATH=/data/cache
 
 USER indexer
 EXPOSE 8092

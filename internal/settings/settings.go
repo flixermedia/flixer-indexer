@@ -20,14 +20,14 @@ type Reloader struct {
 	Client   flixerclient.API
 	Pipeline *pipeline.Pipeline
 	// Pool is nil in API-only processes.
-	Pool     *pipeline.Pool
-	EnvKeys  map[string]string
+	Pool    *pipeline.Pool
+	EnvKeys map[string]string
 	// EnvSubtitles is used while flixer has no OpenSubtitles API key.
 	EnvSubtitles models.SubtitleSettings
-	UA       string
-	Language string
-	Interval time.Duration
-	Log      *slog.Logger
+	UA           string
+	Language     string
+	Interval     time.Duration
+	Log          *slog.Logger
 
 	mu          sync.Mutex
 	lastConc    map[string]int
@@ -54,6 +54,7 @@ func (r *Reloader) Reload(ctx context.Context) error {
 		}
 	}
 	r.Pipeline.SetSubtitles(subs, r.UA)
+	r.Pipeline.SetThemesEnabled(s.Themes != nil && s.Themes.Enabled)
 	if r.Pool == nil {
 		return nil
 	}

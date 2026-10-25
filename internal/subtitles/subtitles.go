@@ -6,8 +6,6 @@
 package subtitles
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -17,6 +15,8 @@ import (
 	"strings"
 	"syscall"
 	"unicode/utf8"
+
+	"github.com/flixermedia/flixer-indexer/internal/mediaid"
 )
 
 // Track is a subtitle file beside a video.
@@ -76,8 +76,11 @@ func FallbackDir(root, rootID, relativePath string) string {
 	if root == "" || rootID == "" || relativePath == "" {
 		return ""
 	}
-	sum := sha256.Sum256([]byte(rootID + "\n" + relativePath))
-	return filepath.Join(root, hex.EncodeToString(sum[:])[:32])
+	key, err := mediaid.Key(rootID, relativePath)
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(root, key)
 }
 
 // List returns the subtitle files beside the video and in the fallback folder,

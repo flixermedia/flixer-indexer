@@ -21,10 +21,11 @@ const (
 	QueueProbe     = "probe"
 	QueueRefresh   = "refresh"
 	QueueTrickplay = "trickplay"
+	QueueThemes    = "themes"
 )
 
 // Queues lists every queue in pipeline order.
-var Queues = []string{QueueScan, QueueIdentify, QueueMetadata, QueueImages, QueueProbe, QueueRefresh, QueueTrickplay}
+var Queues = []string{QueueScan, QueueIdentify, QueueMetadata, QueueImages, QueueProbe, QueueRefresh, QueueTrickplay, QueueThemes}
 
 // MaxConcurrency caps what an admin can set for a single queue.
 const MaxConcurrency = 64
@@ -148,7 +149,7 @@ func Load() (Config, error) {
 
 	defaults := map[string]int{
 		QueueScan: 2, QueueIdentify: 12, QueueMetadata: 12,
-		QueueImages: 8, QueueProbe: 6, QueueRefresh: 4, QueueTrickplay: 1,
+		QueueImages: 8, QueueProbe: 12, QueueRefresh: 4, QueueTrickplay: 6, QueueThemes: 6,
 	}
 	concurrency := make(map[string]int, len(defaults))
 	for queue, fallback := range defaults {
@@ -185,10 +186,10 @@ func Load() (Config, error) {
 		}
 	}
 
-	dataPath := strings.TrimSpace(os.Getenv("DATA_PATH"))
-	cacheDefault := filepath.Join(dataPath, "metadata")
+	dataPath := strings.TrimSpace(envOrDefault("DATA_PATH", os.Getenv("DATA_DIR")))
+	cacheDefault := filepath.Join(dataPath, "cache")
 	if dataPath == "" {
-		cacheDefault = "./cache/metadata"
+		cacheDefault = "./cache"
 	}
 	cachePath := envOrDefault("CACHE_PATH", cacheDefault)
 	if abs, err := filepath.Abs(cachePath); err == nil {

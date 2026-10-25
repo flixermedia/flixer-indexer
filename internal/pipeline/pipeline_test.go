@@ -148,3 +148,18 @@ func TestTrickplayOnlyScanSkipsProgressAndUsesDistinctScanPayload(t *testing.T) 
 		}
 	}
 }
+
+func TestTaskSubjectFindsTheFileForEveryTaskType(t *testing.T) {
+	cases := map[string]struct{ typ, payload, lib, path string }{
+		"trickplay": {TypeTrickplay, `{"libraryId":"L","path":"/m/a.mkv","rootId":"r","relativePath":"a.mkv"}`, "L", "/m/a.mkv"},
+		"themes":    {TypeThemes, `{"libraryId":"L","path":"/m/show","itemType":"series"}`, "L", "/m/show"},
+		"work":      {TypeProbe, `{"item":{"libraryId":"L","type":"movie","path":"/m/b.mkv"}}`, "L", "/m/b.mkv"},
+		"scan":      {TypeScan, `{"libraryId":"L"}`, "L", ""},
+	}
+	for name, c := range cases {
+		lib, _, path := TaskSubject(c.typ, []byte(c.payload))
+		if lib != c.lib || path != c.path {
+			t.Errorf("%s: got %q %q, want %q %q", name, lib, path, c.lib, c.path)
+		}
+	}
+}

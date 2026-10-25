@@ -114,14 +114,14 @@ func (p *Pipeline) ensureSubtitles(ctx context.Context, item *models.Item, h mod
 		path, err := client.Fetch(ctx, target, q, lang)
 		switch {
 		case err == nil:
-			p.Log.Info("subtitles downloaded", "path", path, "language", lang)
+			p.logger(ctx).Info("subtitles downloaded", "path", path, "language", lang)
 		case errors.Is(err, subtitles.ErrNotFound):
 			p.subtitleMisses.Store(item.Path, time.Now())
 		case errors.Is(err, subtitles.ErrQuota):
-			p.Log.Warn("opensubtitles quota reached; skipping automatic subtitles for now")
+			p.logger(ctx).Warn("opensubtitles quota reached; skipping automatic subtitles for now")
 			return
 		default:
-			p.Log.Warn("subtitles unavailable", "path", item.Path, "language", lang, "error", err)
+			p.logger(ctx).Warn("subtitles unavailable", "path", item.Path, "language", lang, "error", err)
 			if ctx.Err() != nil {
 				return
 			}

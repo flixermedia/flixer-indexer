@@ -2,8 +2,6 @@ package trickplay
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/flixermedia/flixer-indexer/internal/mediaid"
 	"github.com/flixermedia/flixer-indexer/internal/probe"
 )
 
@@ -61,8 +60,8 @@ type Index struct {
 }
 
 func Key(rootID, relativePath string) string {
-	sum := sha256.Sum256([]byte(rootID + "\n" + relativePath))
-	return hex.EncodeToString(sum[:])[:32]
+	key, _ := mediaid.Key(rootID, relativePath)
+	return key
 }
 
 func (g *Generator) Generate(ctx context.Context, task Task) error {
@@ -123,7 +122,7 @@ func (g *Generator) Generate(ctx context.Context, task Task) error {
 	}
 
 	pattern := filepath.Join(workDir, "%d.jpg")
-	counter := &frameCounter{}
+	counter := &frameCounter{sink: outputSink(ctx)}
 	timeout := generationTimeout(duration)
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -137,6 +136,7 @@ func (g *Generator) Generate(ctx context.Context, task Task) error {
 		cmd.Stderr = counter
 		runErr = cmd.Run()
 	}
+	counter.flush()
 	if runErr != nil {
 		if runCtx.Err() != nil {
 			return errors.New("ffmpeg timed out while generating trickplay")
@@ -241,22 +241,61 @@ func sheetFiles(directory string) ([]string, error) {
 	return files, nil
 }
 
+type outputKey struct{}
+
+// WithOutput makes Generate pass ffmpeg's output to sink line by line, so callers can show it.
+func WithOutput(ctx context.Context, sink func(line string)) context.Context {
+	return context.WithValue(ctx, outputKey{}, sink)
+}
+
+func outputSink(ctx context.Context) func(string) {
+	sink, _ := ctx.Value(outputKey{}).(func(string))
+	return sink
+}
+
+// progressEvery is how many extracted frames pass between progress lines.
+const progressEvery = 50
+
+// frameCounter counts the frames ffmpeg reports. Every other line goes to sink; the
+// per-frame showinfo lines would flood it, so only a periodic frame count is sent for them.
 type frameCounter struct {
 	count int
 	line  []byte
+	sink  func(string)
 }
 
 func (c *frameCounter) Write(data []byte) (int, error) {
 	for _, b := range data {
-		if b == '\n' {
-			line := string(c.line)
-			if strings.Contains(line, "] n:") {
-				c.count++
-			}
-			c.line = c.line[:0]
+		if b == '\n' || b == '\r' {
+			c.endLine()
 		} else if len(c.line) < 4096 {
 			c.line = append(c.line, b)
 		}
 	}
 	return len(data), nil
+}
+
+func (c *frameCounter) endLine() {
+	line := strings.TrimSpace(string(c.line))
+	c.line = c.line[:0]
+	if line == "" {
+		return
+	}
+	if strings.Contains(line, "] n:") {
+		c.count++
+		if c.sink != nil && c.count%progressEvery == 0 {
+			c.sink(fmt.Sprintf("extracted %d frames", c.count))
+		}
+		return
+	}
+	if c.sink != nil && !strings.Contains(line, "Parsed_showinfo") {
+		c.sink(line)
+	}
+}
+
+func (c *frameCounter) flush() {
+	c.endLine()
+	if c.sink != nil && c.count%progressEvery != 0 {
+		c.sink(fmt.Sprintf("extracted %d frames", c.count))
+	}
 }

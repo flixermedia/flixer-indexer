@@ -30,6 +30,8 @@ import (
 	"github.com/flixermedia/flixer-indexer/internal/providers/registry"
 	"github.com/flixermedia/flixer-indexer/internal/remoteconfig"
 	"github.com/flixermedia/flixer-indexer/internal/settings"
+	"github.com/flixermedia/flixer-indexer/internal/tasklog"
+	"github.com/flixermedia/flixer-indexer/internal/themes"
 	"github.com/flixermedia/flixer-indexer/internal/watcher"
 )
 
@@ -121,6 +123,8 @@ func run() error {
 	store := images.NewStore(cfg.CachePath, cfg.FFmpegPath, cfg.UserAgent)
 	pipe := pipeline.New(client, store, probe.New(cfg.FFprobePath), tracker, queue, log)
 	pipe.SubtitleDir = cfg.SubtitleDir
+	pipe.TaskLogs = tasklog.New(rdb)
+	pipe.Themes = themes.NewFetcher(cfg.CachePath, cfg.FFmpegPath, cfg.UserAgent)
 	pipe.SetTrickplay(cfg.TrickplayEnabled, cfg.TrickplayDir, cfg.FFmpegPath, cfg.TrickplayInterval, cfg.TrickplayWidth)
 
 	if cfg.LyricsFetch {

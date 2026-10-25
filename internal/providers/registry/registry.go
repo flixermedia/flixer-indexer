@@ -30,14 +30,14 @@ var keyless = map[string]bool{"musicbrainz": true, "coverartarchive": true, "ani
 // Registry is an immutable set of providers; a new one is built whenever
 // flixer's settings change.
 type Registry struct {
-	movie   []providers.MovieProvider
-	series  []providers.SeriesProvider
-	anime   []providers.SeriesProvider
-	season  []providers.SeasonProvider
-	episode []providers.EpisodeProvider
-	album   []providers.AlbumProvider
-	images  []providers.ImageProvider
-	discogs *discogs.Provider
+	movie    []providers.MovieProvider
+	series   []providers.SeriesProvider
+	anime    []providers.SeriesProvider
+	season   []providers.SeasonProvider
+	episode  []providers.EpisodeProvider
+	album    []providers.AlbumProvider
+	images   []providers.ImageProvider
+	discogs  *discogs.Provider
 	stats    map[string]*httpx.Stats
 	language string
 	cache    *providers.Cache

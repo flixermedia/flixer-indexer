@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/flixermedia/flixer-indexer/internal/mediaid"
 	"github.com/flixermedia/flixer-indexer/internal/models"
 )
 
@@ -42,7 +43,7 @@ func TestSaveAlongsideAndCache(t *testing.T) {
 	root, cache := t.TempDir(), t.TempDir()
 	movieDir := filepath.Join(root, "Movie (2000)")
 	_ = os.MkdirAll(movieDir, 0o755)
-	item := models.Item{Type: models.ItemMovie, Path: filepath.Join(movieDir, "Movie (2000).mkv")}
+	item := models.Item{Type: models.ItemMovie, Path: filepath.Join(movieDir, "Movie (2000).mkv"), RootID: "root", RelativePath: "Movie (2000)/Movie (2000).mkv"}
 	s := NewStore(cache, "ffmpeg", "test")
 
 	p := Placement{Library: models.Library{ID: "l", ImageStorage: models.StorageAlongside}, Item: item, FolderRoot: root}
@@ -53,8 +54,29 @@ func TestSaveAlongsideAndCache(t *testing.T) {
 
 	p.Library.ImageStorage = models.StorageCache
 	img, err = s.Save(context.Background(), p, models.Image{Type: "backdrop", URL: srv.URL + "/ok.png"}, 1)
-	if err != nil || filepath.Dir(filepath.Dir(img.Path)) != filepath.Join(cache, "l") || filepath.Base(img.Path) != "backdrop1.png" {
+	key, _ := mediaid.Key(item.RootID, item.RelativePath)
+	if err != nil || filepath.Dir(img.Path) != filepath.Join(cache, "images", key) || filepath.Base(img.Path) != "backdrop1.png" {
 		t.Fatalf("cache: %+v, %v", img, err)
+	}
+}
+
+func TestSaveReusesCacheAfterItemRescan(t *testing.T) {
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		w.Write(pngBytes(200, 300))
+	}))
+	defer srv.Close()
+	item := models.Item{Type: models.ItemMovie, Path: "/media/movie.mkv", RootID: "root", RelativePath: "movie.mkv"}
+	s := NewStore(t.TempDir(), "ffmpeg", "test")
+	placement := Placement{Library: models.Library{ImageStorage: models.StorageCache}, Item: item}
+	first, err := s.Save(context.Background(), placement, models.Image{Type: "poster", URL: srv.URL + "/poster.png"}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := s.Save(context.Background(), placement, models.Image{Type: "poster", URL: "http://unreachable.invalid/poster.png"}, 0)
+	if err != nil || second.Path != first.Path || requests != 1 {
+		t.Fatalf("reused image = %+v, requests = %d, error = %v", second, requests, err)
 	}
 }
 

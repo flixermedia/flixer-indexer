@@ -10,7 +10,8 @@ Each stage is an Asynq queue (Redis) with its own worker pool; concurrency can b
 
 - Local NFO files and local artwork win; remote metadata/images only fill gaps.
 - Providers: TMDB, TVDB, OMDb, Fanart.tv, AniList, AniDB (aid only), MusicBrainz/Cover Art Archive, TheAudioDB, Discogs.
-- Artwork is stored alongside media or in `CACHE_PATH`, per library setting.
+- Artwork is stored alongside media or in `CACHE_PATH/images/{media-id}`, per library setting. The media ID is a stable hash of its library root ID and relative path.
+- People photos are cached in `CACHE_PATH/people/{person-id}.jpg`; themes and subtitles are cached under `CACHE_PATH/theme/{media-id}` and `CACHE_PATH/subtitles/{media-id}`.
 
 ## Running
 
@@ -27,7 +28,7 @@ Requires Redis, and `ffprobe`/`ffmpeg` on PATH (or `FFPROBE_PATH`/`FFMPEG_PATH`)
 | `FLIXER_URL` | http://localhost:8083 | alias `FLIXER_INTERNAL_URL`. At startup the indexer also asks flixer whether Sentry is enabled (toggle it in the admin dashboard); if flixer is unreachable it starts with Sentry off |
 | `APP_SECRET` | — | shared HMAC secret (falls back to `JWT_SECRET`) |
 | `REDIS_ADDR` | localhost:6379 | |
-| `CACHE_PATH` | ./cache/metadata | Artwork cache; the default trickplay directory is `<CACHE_PATH>/trickplay` |
+| `CACHE_PATH` | ./cache | Root for people, artwork, theme, subtitle and trickplay caches |
 | `TRICKPLAY_ENABLED` | true | Automatically queue hover-seek sheets for movies, episodes and videos after indexing |
 | `TRICKPLAY_DIR` | `<CACHE_PATH>/trickplay` | Shared thumbnail cache; mount read-only into the streamer |
 | `TRICKPLAY_INTERVAL` | 10 | Thumbnail spacing in seconds (2–60) |

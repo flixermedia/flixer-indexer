@@ -23,6 +23,7 @@ import (
 	"github.com/flixermedia/flixer-indexer/internal/providers"
 	"github.com/flixermedia/flixer-indexer/internal/providers/registry"
 	"github.com/flixermedia/flixer-indexer/internal/scanner"
+	"github.com/flixermedia/flixer-indexer/internal/tasklog"
 	"github.com/flixermedia/flixer-indexer/internal/trickplay"
 )
 
@@ -42,7 +43,7 @@ func (p *Pipeline) handleScan(ctx context.Context, t *asynq.Task) error {
 	if err := p.Progress.Start(ctx, lib.ID); err != nil {
 		return err
 	}
-	p.Log.Info("scan started", "library", lib.ID, "name", lib.Name, "type", lib.Type)
+	p.logger(ctx).Info("scan started", "library", lib.ID, "name", lib.Name, "type", lib.Type)
 
 	err = scanner.Scan(ctx, lib, func(w models.Work) error {
 		w.Force = req.Force
@@ -59,7 +60,7 @@ func (p *Pipeline) handleScan(ctx context.Context, t *asynq.Task) error {
 		_ = p.Progress.WalkFailed(context.WithoutCancel(ctx), lib.ID, err)
 		return fmt.Errorf("scan %s: %w: %w", lib.ID, err, asynq.SkipRetry)
 	}
-	p.Log.Info("scan walk finished", "library", lib.ID)
+	p.logger(ctx).Info("scan walk finished", "library", lib.ID)
 	if err := p.Progress.WalkDone(ctx, lib.ID); err != nil {
 		return err
 	}
@@ -70,7 +71,7 @@ func (p *Pipeline) handleScan(ctx context.Context, t *asynq.Task) error {
 
 // handleRefresh re-describes a single path and runs it through the pipeline.
 func (p *Pipeline) handleTrickplayScan(ctx context.Context, lib models.Library) error {
-	p.Log.Info("trickplay backfill started", "library", lib.ID, "name", lib.Name)
+	p.logger(ctx).Info("trickplay backfill started", "library", lib.ID, "name", lib.Name)
 	return scanner.Scan(ctx, lib, func(w models.Work) error {
 		item := w.Item
 		if (item.Type != models.ItemMovie && item.Type != models.ItemEpisode && item.Type != models.ItemVideo) || item.RootID == "" || item.RelativePath == "" {
@@ -79,7 +80,7 @@ func (p *Pipeline) handleTrickplayScan(ctx context.Context, lib models.Library) 
 		task := trickplay.Task{LibraryID: item.LibraryID, Path: item.Path, RootID: item.RootID, RelativePath: item.RelativePath}
 		_, err := p.Enqueue(ctx, config.QueueTrickplay, TypeTrickplay, task, 1)
 		if err != nil {
-			p.Log.Warn("could not queue trickplay during backfill", "library", lib.ID, "error", err)
+			p.logger(ctx).Warn("could not queue trickplay during backfill", "library", lib.ID, "error", err)
 		}
 		return nil
 	})
@@ -93,8 +94,12 @@ func (p *Pipeline) handleTrickplay(ctx context.Context, t *asynq.Task) error {
 	if err := json.Unmarshal(t.Payload(), &task); err != nil || task.Path == "" || task.RootID == "" || task.RelativePath == "" {
 		return fmt.Errorf("bad trickplay payload: %w", asynq.SkipRetry)
 	}
+	if p.TaskLogs != nil && tasklog.InTask(ctx) {
+		log := p.logger(ctx)
+		ctx = trickplay.WithOutput(ctx, func(line string) { log.Info("ffmpeg: " + line) })
+	}
 	if err := p.Trickplay.Generate(ctx, task); err != nil {
-		p.Log.Warn("trickplay generation failed", "library", task.LibraryID, "error", err)
+		p.logger(ctx).Warn("trickplay generation failed", "library", task.LibraryID, "error", err)
 		return err
 	}
 	return nil
@@ -188,7 +193,7 @@ func (p *Pipeline) handleIdentify(ctx context.Context, t *asynq.Task) error {
 	if path := nfoPath(*item, root); path != "" {
 		data, err := nfo.Read(path)
 		if err != nil {
-			p.Log.Warn("unreadable nfo", "path", path, "error", err)
+			p.logger(ctx).Warn("unreadable nfo", "path", path, "error", err)
 		} else {
 			item.NFOPresent = true
 			item.Metadata = data.Metadata
@@ -212,7 +217,7 @@ func (p *Pipeline) handleIdentify(ctx context.Context, t *asynq.Task) error {
 	if item.Type == models.ItemTrack {
 		res, err := p.Probe.Probe(ctx, item.Path)
 		if err != nil {
-			p.Log.Warn("track probe failed", "path", item.Path, "error", err)
+			p.logger(ctx).Warn("track probe failed", "path", item.Path, "error", err)
 		} else {
 			item.Technical = &res.Technical
 			applyTags(item, res.Tags)
@@ -239,11 +244,11 @@ func (p *Pipeline) ensureLyrics(ctx context.Context, item *models.Item, h models
 	}
 	found, err := lyrics.Ensure(ctx, p.Lyrics, item.Path, q)
 	if err != nil {
-		p.Log.Warn("lyrics unavailable", "path", item.Path, "error", err)
+		p.logger(ctx).Warn("lyrics unavailable", "path", item.Path, "error", err)
 		return
 	}
 	if found {
-		p.Log.Debug("lyrics ready", "path", lyrics.Path(item.Path))
+		p.logger(ctx).Debug("lyrics ready", "path", lyrics.Path(item.Path))
 	}
 }
 
@@ -462,7 +467,7 @@ func (p *Pipeline) handleImages(ctx context.Context, t *asynq.Task) error {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			p.Log.Debug("image skipped", "path", item.Path, "provider", c.Provider, "error", err)
+			p.logger(ctx).Debug("image skipped", "path", item.Path, "provider", c.Provider, "error", err)
 			continue
 		}
 		saved[c.Type]++
@@ -522,7 +527,7 @@ func (p *Pipeline) handleProbe(ctx context.Context, t *asynq.Task) error {
 				if retried < maxRetry {
 					return err
 				}
-				p.Log.Warn("probe failed; indexing without technical details", "path", item.Path, "error", err)
+				p.logger(ctx).Warn("probe failed; indexing without technical details", "path", item.Path, "error", err)
 			}
 		}
 	}
@@ -546,9 +551,10 @@ func (p *Pipeline) handleProbe(ctx context.Context, t *asynq.Task) error {
 	if p.TrickplayEnabled && (item.Type == models.ItemMovie || item.Type == models.ItemEpisode || item.Type == models.ItemVideo) && item.RootID != "" && item.RelativePath != "" {
 		task := trickplay.Task{LibraryID: item.LibraryID, Path: item.Path, RootID: item.RootID, RelativePath: item.RelativePath}
 		if _, enqueueErr := p.Enqueue(ctx, config.QueueTrickplay, TypeTrickplay, task, 1); enqueueErr != nil {
-			p.Log.Warn("could not queue trickplay", "library", item.LibraryID, "error", enqueueErr)
+			p.logger(ctx).Warn("could not queue trickplay", "library", item.LibraryID, "error", enqueueErr)
 		}
 	}
+	p.queueTheme(ctx, *item)
 	if !w.Untracked {
 		if err := p.Progress.Done(ctx, item.LibraryID); err != nil {
 			return err
@@ -566,16 +572,16 @@ func (p *Pipeline) pruneIfComplete(ctx context.Context, libraryID string) {
 	startedAt, ok, err := p.Progress.ClaimPrune(ctx, libraryID)
 	if err != nil || !ok {
 		if err != nil {
-			p.Log.Warn("prune check failed", "library", libraryID, "error", err)
+			p.logger(ctx).Warn("prune check failed", "library", libraryID, "error", err)
 		}
 		return
 	}
 	removed, err := p.Client.PruneLibrary(context.WithoutCancel(ctx), libraryID, startedAt)
 	if err != nil {
-		p.Log.Warn("prune failed", "library", libraryID, "error", err)
+		p.logger(ctx).Warn("prune failed", "library", libraryID, "error", err)
 		return
 	}
-	p.Log.Info("scan pruned", "library", libraryID, "removed", removed)
+	p.logger(ctx).Info("scan pruned", "library", libraryID, "removed", removed)
 }
 
 // finalize fills anything still empty from what the filesystem told us.

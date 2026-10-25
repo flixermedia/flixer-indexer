@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -22,6 +23,7 @@ import (
 	"github.com/flixermedia/flixer-indexer/internal/pipeline"
 	"github.com/flixermedia/flixer-indexer/internal/probe"
 	"github.com/flixermedia/flixer-indexer/internal/progress"
+	"github.com/flixermedia/flixer-indexer/internal/tasklog"
 )
 
 type noProbe struct{}
@@ -44,6 +46,7 @@ func newServer(t *testing.T) http.Handler {
 	log := slog.New(slog.NewTextHandler(testWriter{t}, nil))
 	tracker := progress.New(rdb)
 	p := pipeline.New(stub, images.NewStore(t.TempDir(), "ffmpeg", "t"), noProbe{}, tracker, client, log)
+	p.TaskLogs = tasklog.New(rdb)
 	return (&Server{Secret: secret, Pipeline: p, Inspector: insp, Progress: tracker, Redis: rdb, Log: log}).Handler()
 }
 
@@ -120,5 +123,22 @@ func TestScanAndInspect(t *testing.T) {
 	}
 	if rec := do(h, "GET", "/internal/tasks?queue=bogus", nil, true); rec.Code != http.StatusBadRequest {
 		t.Errorf("bad queue = %d", rec.Code)
+	}
+}
+
+func TestTaskLogsEndpoint(t *testing.T) {
+	h := newServer(t)
+	if rec := do(h, http.MethodGet, "/internal/tasks/nope/abc/logs", nil, true); rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown queue = %d", rec.Code)
+	}
+	rec := do(h, http.MethodGet, "/internal/tasks/probe/abc/logs?offset=0", nil, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("logs = %d %s", rec.Code, rec.Body)
+	}
+	if !strings.Contains(rec.Body.String(), `"entries":[]`) || !strings.Contains(rec.Body.String(), `"total":0`) {
+		t.Fatalf("unexpected body %s", rec.Body)
+	}
+	if rec := do(h, http.MethodGet, "/internal/tasks/probe/abc/logs", nil, false); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unsigned = %d", rec.Code)
 	}
 }

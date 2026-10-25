@@ -29,7 +29,7 @@ This document is a complete, self-contained specification. An AI (or human) shou
 - **Database ownership**: flixer owns every write. The indexer **never** writes to Postgres directly. It collects metadata and calls flixer’s internal API to persist.
 - **Libraries**: Stored in the database (path + type). Indexer discovers library locations from flixer and scans only those paths.
 - **Metadata providers**: Everything supported by Jellyfin **and** Plex.
-- **Image storage**: Per-library setting — either “alongside media files” or `flixer-data/cache/metadata/...`. Choice is stored in the DB.
+- **Image storage**: Per-library setting — either “alongside media files” or `flixer-data/cache/images/{media-id}/...`. The stable media ID is derived from the library root ID and relative path.
 - **Concurrency**: Expect tens of thousands of items. Max concurrent workers per queue is adjustable live from flixer-web admin.
 - **Image work**: Download + any manipulation runs on a **dedicated** Asynq queue/workers so it never blocks metadata work.
 - **NFO / local priority**: Identical to Jellyfin — local NFO files and local images always win over remote providers.
@@ -245,7 +245,7 @@ imageStorage: "alongside" | "cache"
 
 - `"alongside"` → write posters, backdrops, logos, etc. next to the media file (or in a conventional sub-folder such as `.media` / `metadata`).
 - `"cache"` → everything under  
-  `flixer-data/cache/metadata/{libraryId}/{itemId}/…`
+  `flixer-data/cache/images/{media-id}/…`
 
 The indexer must respect the setting when downloading/saving images.  
 The choice is stored in the database and can be changed by an admin.
@@ -367,12 +367,12 @@ REDIS_ADDR=redis:6379
 REDIS_PASSWORD=
 REDIS_DB=0
 MEDIA_PATH=/media                               # same mount as flixer/streamer
-CACHE_PATH=/cache/metadata                      # when image_storage=cache
+CACHE_PATH=/data/cache                          # root of the media cache folders
 CONCURRENCY_SCAN=2
 CONCURRENCY_IDENTIFY=12
 CONCURRENCY_METADATA=12
 CONCURRENCY_IMAGES=8
-CONCURRENCY_PROBE=6
+CONCURRENCY_PROBE=12
 LOG_LEVEL=info
 ```
 

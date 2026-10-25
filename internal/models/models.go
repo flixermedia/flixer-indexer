@@ -77,6 +77,12 @@ type Settings struct {
 	Concurrency map[string]int             `json:"concurrency"`
 	Language    string                     `json:"language,omitempty"`
 	Subtitles   *SubtitleSettings          `json:"subtitles,omitempty"`
+	Themes      *ThemeSettings             `json:"themes,omitempty"`
+}
+
+// ThemeSettings switches ThemerrDB theme-song downloads on.
+type ThemeSettings struct {
+	Enabled bool `json:"enabled"`
 }
 
 // Person is a cast or crew member.

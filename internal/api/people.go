@@ -1,17 +1,22 @@
 package api
 
 import (
-	"crypto/sha1"
-	"encoding/hex"
+	"bytes"
 	"errors"
+	"image"
+	"image/jpeg"
+	_ "image/png"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
+
+	_ "golang.org/x/image/webp"
 )
 
 // Person photos come from provider-supplied metadata, so only these hosts are ever requested.
@@ -21,20 +26,21 @@ var personPhotoHosts = map[string]bool{
 
 const (
 	maxPersonPhoto  = 5 << 20
-	personCacheDir  = "_people"
+	personCacheDir  = "people"
 	personFetchWait = 15 * time.Second
 )
 
 var (
-	personHTTP = &http.Client{
+	personIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+	personHTTP      = &http.Client{
 		Timeout:       personFetchWait,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
-	personMimes = map[string]string{"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}
 	personLocks sync.Map
 )
 
 type personImageRequest struct {
+	ID  string `json:"id"`
 	URL string `json:"url"`
 }
 
@@ -49,7 +55,7 @@ func allowedPersonPhoto(raw string) (string, bool) {
 	return u.String(), true
 }
 
-// personImage serves a person photo, downloading it into the metadata cache on first use
+// personImage serves a person photo, downloading it into the cache on first use
 // so later requests never reach the metadata provider.
 func (s *Server) personImage(w http.ResponseWriter, r *http.Request) {
 	var req personImageRequest
@@ -57,12 +63,11 @@ func (s *Server) personImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	photo, ok := allowedPersonPhoto(req.URL)
-	if !ok || s.CachePath == "" {
-		writeError(w, http.StatusBadRequest, "url is not an allowed person photo")
+	if !ok || !personIDPattern.MatchString(req.ID) || s.CachePath == "" {
+		writeError(w, http.StatusBadRequest, "person id and an allowed photo URL are required")
 		return
 	}
-	sum := sha1.Sum([]byte(photo))
-	base := filepath.Join(s.CachePath, personCacheDir, hex.EncodeToString(sum[:]))
+	base := filepath.Join(s.CachePath, personCacheDir, strings.ToLower(req.ID)+".jpg")
 
 	path, ctype := cachedPersonPhoto(base)
 	if path == "" {
@@ -76,6 +81,7 @@ func (s *Server) personImage(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				s.Log.Warn("person photo download failed", "error", err.Error())
 				mu.Unlock()
+				personLocks.Delete(base)
 				writeError(w, http.StatusBadGateway, "the image could not be loaded")
 				return
 			}
@@ -101,10 +107,8 @@ func (s *Server) personImage(w http.ResponseWriter, r *http.Request) {
 }
 
 func cachedPersonPhoto(base string) (string, string) {
-	for ctype, ext := range personMimes {
-		if info, err := os.Stat(base + "." + ext); err == nil && info.Mode().IsRegular() {
-			return base + "." + ext, ctype
-		}
+	if info, err := os.Stat(base); err == nil && info.Mode().IsRegular() {
+		return base, "image/jpeg"
 	}
 	return "", ""
 }
@@ -122,15 +126,18 @@ func downloadPersonPhoto(r *http.Request, photo, base string) (string, string, e
 	}
 	defer resp.Body.Close()
 	ctype := strings.ToLower(strings.TrimSpace(strings.SplitN(resp.Header.Get("Content-Type"), ";", 2)[0]))
-	ext, ok := personMimes[ctype]
-	if resp.StatusCode != http.StatusOK || !ok {
+	if resp.StatusCode != http.StatusOK || (ctype != "image/jpeg" && ctype != "image/png" && ctype != "image/webp") {
 		return "", "", errors.New("unexpected response")
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxPersonPhoto+1))
 	if err != nil || len(data) == 0 || len(data) > maxPersonPhoto {
 		return "", "", errors.New("invalid image body")
 	}
-	dest := base + "." + ext
+	decoded, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		return "", "", errors.New("invalid image body")
+	}
+	dest := base
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return "", "", err
 	}
@@ -138,11 +145,11 @@ func downloadPersonPhoto(r *http.Request, photo, base string) (string, string, e
 	if err != nil {
 		return "", "", err
 	}
-	_, werr := tmp.Write(data)
+	werr := jpeg.Encode(tmp, decoded, &jpeg.Options{Quality: 90})
 	cerr := tmp.Close()
 	if werr != nil || cerr != nil || os.Rename(tmp.Name(), dest) != nil {
 		os.Remove(tmp.Name())
 		return "", "", errors.New("could not store image")
 	}
-	return dest, ctype, nil
+	return dest, "image/jpeg", nil
 }

@@ -198,3 +198,22 @@ type noVideoProber struct{}
 func (noVideoProber) Probe(context.Context, string) (*probe.Result, error) {
 	return &probe.Result{Technical: models.Technical{AudioCodec: "aac", Duration: 3600}}, nil
 }
+
+func TestFrameCounterForwardsOutputWithoutPerFrameLines(t *testing.T) {
+	var lines []string
+	c := &frameCounter{sink: func(l string) { lines = append(lines, l) }}
+	_, _ = c.Write([]byte("Input #0, matroska\n"))
+	for i := 0; i < 120; i++ {
+		_, _ = c.Write([]byte("[Parsed_showinfo_2 @ 0x1] n:   0 pts:1\n"))
+	}
+	_, _ = c.Write([]byte("[Parsed_showinfo_2 @ 0x1]   color_range:pc color_space:bt709\n"))
+	_, _ = c.Write([]byte("error: boom"))
+	c.flush()
+	if c.count != 120 {
+		t.Fatalf("count = %d", c.count)
+	}
+	want := []string{"Input #0, matroska", "extracted 50 frames", "extracted 100 frames", "error: boom", "extracted 120 frames"}
+	if strings.Join(lines, "|") != strings.Join(want, "|") {
+		t.Fatalf("lines = %q", lines)
+	}
+}

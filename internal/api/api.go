@@ -40,7 +40,7 @@ type Server struct {
 	Reloader *settings.Reloader
 	Log      *slog.Logger
 	Now      func() time.Time
-	// CachePath is where downloaded artwork is cached; images there may be served.
+	// CachePath is the root of media caches; cached images there may be served.
 	CachePath string
 	// Bios looks up people's biographies; a default client is used when unset.
 	Bios *bios.Client
@@ -63,6 +63,7 @@ func (s *Server) Handler() http.Handler {
 	signed.HandleFunc("GET /internal/scans", s.scans)
 	signed.HandleFunc("GET /internal/stats", s.stats)
 	signed.HandleFunc("GET /internal/tasks", s.tasks)
+	signed.HandleFunc("GET /internal/tasks/{queue}/{id}/logs", s.taskLogs)
 	signed.HandleFunc("POST /internal/tasks/{queue}/{id}/cancel", s.cancelTask)
 	signed.HandleFunc("POST /internal/tasks/{queue}/{id}/retry", s.retryTask)
 	signed.HandleFunc("POST /internal/queues/{queue}/cancel-active", s.cancelActive)
@@ -73,6 +74,8 @@ func (s *Server) Handler() http.Handler {
 	signed.HandleFunc("GET /internal/concurrency", s.getConcurrency)
 	signed.HandleFunc("POST /internal/concurrency", s.setConcurrency)
 	signed.HandleFunc("POST /internal/image", s.image)
+	signed.HandleFunc("POST /internal/theme", s.theme)
+	signed.HandleFunc("POST /internal/themes/queue", s.queueThemes)
 	signed.HandleFunc("POST /internal/people/image", s.personImage)
 	signed.HandleFunc("POST /internal/people/bio", s.personBio)
 	signed.HandleFunc("POST /internal/subtitles/list", s.subtitleList)
@@ -241,17 +244,18 @@ func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
 }
 
 type taskView struct {
-	ID         string `json:"id"`
-	Queue      string `json:"queue"`
-	Type       string `json:"type"`
-	State      string `json:"state"`
-	Retried    int    `json:"retried"`
-	MaxRetry   int    `json:"maxRetry"`
-	LastError  string `json:"lastError,omitempty"`
-	LastFailed string `json:"lastFailedAt,omitempty"`
-	LibraryID  string `json:"libraryId,omitempty"`
-	ItemType   string `json:"itemType,omitempty"`
-	Path       string `json:"path,omitempty"`
+	ID          string `json:"id"`
+	Queue       string `json:"queue"`
+	Type        string `json:"type"`
+	State       string `json:"state"`
+	Retried     int    `json:"retried"`
+	MaxRetry    int    `json:"maxRetry"`
+	LastError   string `json:"lastError,omitempty"`
+	LastFailed  string `json:"lastFailedAt,omitempty"`
+	LibraryID   string `json:"libraryId,omitempty"`
+	ItemType    string `json:"itemType,omitempty"`
+	Path        string `json:"path,omitempty"`
+	LibraryName string `json:"libraryName,omitempty"`
 }
 
 func view(info *asynq.TaskInfo) taskView {
@@ -262,23 +266,7 @@ func view(info *asynq.TaskInfo) taskView {
 	if !info.LastFailedAt.IsZero() {
 		v.LastFailed = info.LastFailedAt.UTC().Format(time.RFC3339)
 	}
-	switch info.Type {
-	case pipeline.TypeScan:
-		var req models.ScanRequest
-		if json.Unmarshal(info.Payload, &req) == nil {
-			v.LibraryID = req.LibraryID
-		}
-	case pipeline.TypeRefresh:
-		var req models.RefreshRequest
-		if json.Unmarshal(info.Payload, &req) == nil {
-			v.LibraryID, v.ItemType, v.Path = req.LibraryID, req.ItemType, req.Path
-		}
-	default:
-		var w models.Work
-		if json.Unmarshal(info.Payload, &w) == nil {
-			v.LibraryID, v.ItemType, v.Path = w.Item.LibraryID, w.Item.Type, w.Item.Path
-		}
-	}
+	v.LibraryID, v.ItemType, v.Path = pipeline.TaskSubject(info.Type, info.Payload)
 	return v
 }
 
@@ -332,9 +320,39 @@ func (s *Server) tasks(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]taskView, 0, len(list))
 	for _, t := range list {
-		out = append(out, view(t))
+		v := view(t)
+		if v.LibraryID != "" && s.Pipeline != nil {
+			if lib, err := s.Pipeline.Library(r.Context(), v.LibraryID); err == nil {
+				v.LibraryName = lib.Name
+			}
+		}
+		out = append(out, v)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"queue": queue, "state": state, "page": page, "tasks": out})
+}
+
+// taskLogs returns a task's recorded log lines from offset on, plus the task's current state when it still exists.
+func (s *Server) taskLogs(w http.ResponseWriter, r *http.Request) {
+	queue, id := r.PathValue("queue"), r.PathValue("id")
+	if !slices.Contains(config.Queues, queue) || id == "" || len(id) > 64 {
+		writeError(w, http.StatusNotFound, "task not found")
+		return
+	}
+	if s.Pipeline == nil || s.Pipeline.TaskLogs == nil {
+		writeError(w, http.StatusServiceUnavailable, "task logs are not available")
+		return
+	}
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	entries, total, err := s.Pipeline.TaskLogs.Read(r.Context(), queue, id, offset)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not read task logs")
+		return
+	}
+	state := ""
+	if info, err := s.Inspector.GetTaskInfo(queue, id); err == nil {
+		state = info.State.String()
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"queue": queue, "id": id, "state": state, "total": total, "entries": entries})
 }
 
 func (s *Server) cancelTask(w http.ResponseWriter, r *http.Request) {

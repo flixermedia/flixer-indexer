@@ -22,6 +22,8 @@ import (
 	"github.com/flixermedia/flixer-indexer/internal/probe"
 	"github.com/flixermedia/flixer-indexer/internal/progress"
 	"github.com/flixermedia/flixer-indexer/internal/providers/registry"
+	"github.com/flixermedia/flixer-indexer/internal/tasklog"
+	"github.com/flixermedia/flixer-indexer/internal/themes"
 	"github.com/flixermedia/flixer-indexer/internal/trickplay"
 )
 
@@ -34,6 +36,7 @@ const (
 	TypeProbe     = "probe:item"
 	TypeRefresh   = "refresh:item"
 	TypeTrickplay = "trickplay:item"
+	TypeThemes    = "themes:item"
 )
 
 const (
@@ -53,14 +56,20 @@ type Pipeline struct {
 	Images *images.Store
 	Probe  Prober
 	// Lyrics downloads missing .lrc files; nil keeps lyrics local-only.
-	Lyrics           *lyrics.Fetcher
-	Progress         *progress.Tracker
-	Queue            *asynq.Client
-	Log              *slog.Logger
+	Lyrics   *lyrics.Fetcher
+	Progress *progress.Tracker
+	Queue    *asynq.Client
+	Log      *slog.Logger
+	// TaskLogs records each task's log output; nil disables it.
+	TaskLogs         *tasklog.Store
 	Trickplay        *trickplay.Generator
 	TrickplayEnabled bool
 	// SubtitleDir stores subtitles for videos whose media folder is read-only.
 	SubtitleDir string
+
+	// Themes downloads ThemerrDB theme songs; nil disables them.
+	Themes        *themes.Fetcher
+	themesEnabled atomic.Bool
 
 	subs           atomic.Pointer[subtitleState]
 	subtitleMisses sync.Map // video path -> time of the last fruitless search
@@ -139,6 +148,8 @@ func queueTimeout(queue string) time.Duration {
 		return 3 * time.Minute
 	case config.QueueTrickplay:
 		return 3 * time.Hour
+	case config.QueueThemes:
+		return 15 * time.Minute
 	default:
 		return 5 * time.Minute
 	}
@@ -169,8 +180,53 @@ func (p *Pipeline) StartRefresh(ctx context.Context, req models.RefreshRequest) 
 	return p.Enqueue(ctx, config.QueueRefresh, TypeRefresh, req, maxRetry)
 }
 
+// logger returns the logger for work running under ctx; inside a task it also records into that task's log.
+func (p *Pipeline) logger(ctx context.Context) *slog.Logger {
+	return tasklog.Logger(ctx, p.TaskLogs, p.Log)
+}
+
+// withTaskLog records the start and outcome of every attempt in the task's log.
+func (p *Pipeline) withTaskLog(queue string, h asynq.HandlerFunc) asynq.HandlerFunc {
+	return func(ctx context.Context, t *asynq.Task) error {
+		id, ok := asynq.GetTaskID(ctx)
+		if !ok || p.TaskLogs == nil {
+			return h(ctx, t)
+		}
+		ctx = tasklog.WithTask(ctx, queue, id)
+		retried, _ := asynq.GetRetryCount(ctx)
+		lib, _, path := TaskSubject(t.Type(), t.Payload())
+		args := []any{"type", t.Type(), "attempt", retried + 1}
+		if path != "" {
+			args = append(args, "path", path)
+		}
+		if lib != "" {
+			if l, err := p.Library(ctx, lib); err == nil && l.Name != "" {
+				args = append(args, "library", l.Name)
+			}
+		}
+		p.logger(ctx).Info("attempt started", args...)
+		err := h(ctx, t)
+		if err != nil {
+			p.logger(ctx).Error("attempt failed", "error", err)
+		} else {
+			p.logger(ctx).Info("attempt finished")
+		}
+		return err
+	}
+}
+
 // Handlers maps each queue to the handler for its task type.
 func (p *Pipeline) Handlers() map[string]map[string]asynq.HandlerFunc {
+	handlers := p.handlers()
+	for queue, byType := range handlers {
+		for typ, h := range byType {
+			byType[typ] = p.withTaskLog(queue, h)
+		}
+	}
+	return handlers
+}
+
+func (p *Pipeline) handlers() map[string]map[string]asynq.HandlerFunc {
 	return map[string]map[string]asynq.HandlerFunc{
 		config.QueueScan:      {TypeScan: p.handleScan},
 		config.QueueIdentify:  {TypeIdentify: p.handleIdentify},
@@ -179,6 +235,7 @@ func (p *Pipeline) Handlers() map[string]map[string]asynq.HandlerFunc {
 		config.QueueProbe:     {TypeProbe: p.handleProbe},
 		config.QueueRefresh:   {TypeRefresh: p.handleRefresh},
 		config.QueueTrickplay: {TypeTrickplay: p.handleTrickplay},
+		config.QueueThemes:    {TypeThemes: p.handleThemes},
 	}
 }
 
@@ -200,6 +257,37 @@ func (p *Pipeline) OnError(ctx context.Context, task *asynq.Task, err error) {
 	if json.Unmarshal(task.Payload(), &w) == nil && !w.Untracked {
 		_ = p.Progress.Failed(context.WithoutCancel(ctx), w.Item.LibraryID)
 	}
+}
+
+// TaskSubject says which library and media file a queued task works on.
+func TaskSubject(typ string, payload []byte) (libraryID, itemType, path string) {
+	switch typ {
+	case TypeScan:
+		var req models.ScanRequest
+		if json.Unmarshal(payload, &req) == nil {
+			libraryID = req.LibraryID
+		}
+	case TypeRefresh:
+		var req models.RefreshRequest
+		if json.Unmarshal(payload, &req) == nil {
+			libraryID, itemType, path = req.LibraryID, req.ItemType, req.Path
+		}
+	case TypeTrickplay, TypeThemes:
+		var task struct {
+			LibraryID string `json:"libraryId"`
+			ItemType  string `json:"itemType"`
+			Path      string `json:"path"`
+		}
+		if json.Unmarshal(payload, &task) == nil {
+			libraryID, itemType, path = task.LibraryID, task.ItemType, task.Path
+		}
+	default:
+		var w models.Work
+		if json.Unmarshal(payload, &w) == nil {
+			libraryID, itemType, path = w.Item.LibraryID, w.Item.Type, w.Item.Path
+		}
+	}
+	return libraryID, itemType, path
 }
 
 func decodeWork(t *asynq.Task) (models.Work, error) {

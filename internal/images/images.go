@@ -5,8 +5,6 @@ package images
 import (
 	"bytes"
 	"context"
-	"crypto/sha1"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"image"
@@ -23,6 +21,7 @@ import (
 
 	_ "golang.org/x/image/webp"
 
+	"github.com/flixermedia/flixer-indexer/internal/mediaid"
 	"github.com/flixermedia/flixer-indexer/internal/models"
 	"github.com/flixermedia/flixer-indexer/internal/naming"
 )
@@ -145,6 +144,27 @@ type Placement struct {
 // distinguishes multiple images of one type. Alongside storage falls back to
 // the cache when the media folder is read-only.
 func (s *Store) Save(ctx context.Context, p Placement, img models.Image, index int) (models.Image, error) {
+	if _, err := mediaid.Key(p.Item.RootID, p.Item.RelativePath); err == nil {
+		path, cfg, ok, err := s.cachedImage(p, img.Type, index)
+		if err != nil {
+			return img, err
+		}
+		if ok {
+			if p.Library.ImageStorage == models.StorageAlongside {
+				data, err := os.ReadFile(path)
+				if err != nil {
+					return img, err
+				}
+				dest := alongsidePath(p, img, index, filepath.Ext(path)[1:])
+				if err := writeAtomic(dest, data); err == nil {
+					path = dest
+				}
+			}
+			img.Path, img.URL = path, ""
+			img.Width, img.Height = cfg.Width, cfg.Height
+			return img, nil
+		}
+	}
 	data, ext, cfg, err := s.fetch(ctx, img.URL)
 	if err != nil {
 		return img, err
@@ -171,12 +191,43 @@ func (s *Store) place(p Placement, img models.Image, index int, ext string, data
 			return img, nil
 		}
 	}
-	dest := s.cachePath(p, img.Type, index, ext)
+	dest, err := s.cachePath(p, img.Type, index, ext)
+	if err != nil {
+		return img, err
+	}
+	if err := ensureCacheDirectory(filepath.Dir(dest)); err != nil {
+		return img, err
+	}
 	if err := writeAtomic(dest, data); err != nil {
 		return img, err
 	}
 	img.Path, img.URL = dest, ""
 	return img, nil
+}
+
+func (s *Store) cachedImage(p Placement, imgType string, index int) (string, image.Config, bool, error) {
+	for _, ext := range []string{"jpg", "jpeg", "png", "webp", "gif"} {
+		path, err := s.cachePath(p, imgType, index, ext)
+		if err != nil {
+			return "", image.Config{}, false, err
+		}
+		file, err := os.Open(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return "", image.Config{}, false, err
+		}
+		cfg, _, decodeErr := image.DecodeConfig(file)
+		closeErr := file.Close()
+		if closeErr != nil {
+			return "", image.Config{}, false, closeErr
+		}
+		if decodeErr == nil {
+			return path, cfg, true, nil
+		}
+	}
+	return "", image.Config{}, false, nil
 }
 
 func (s *Store) fetch(ctx context.Context, url string) ([]byte, string, image.Config, error) {
@@ -259,13 +310,16 @@ func alongsidePath(p Placement, img models.Image, index int, ext string) string 
 	return filepath.Join(dir, naming.Base(item.Path)+"-"+name+"."+ext)
 }
 
-func (s *Store) cachePath(p Placement, imgType string, index int, ext string) string {
-	sum := sha1.Sum([]byte(p.Item.Type + "|" + p.Item.Path))
+func (s *Store) cachePath(p Placement, imgType string, index int, ext string) (string, error) {
+	key, err := mediaid.Key(p.Item.RootID, p.Item.RelativePath)
+	if err != nil {
+		return "", fmt.Errorf("cache artwork: %w", err)
+	}
 	name := imgType
 	if index > 0 {
 		name += fmt.Sprint(index)
 	}
-	return filepath.Join(s.CachePath, p.Library.ID, hex.EncodeToString(sum[:])[:16], name+"."+ext)
+	return filepath.Join(s.CachePath, "images", key, name+"."+ext), nil
 }
 
 func writeAtomic(dest string, data []byte) error {
@@ -282,6 +336,7 @@ func writeAtomic(dest string, data []byte) error {
 		os.Remove(name)
 		return err
 	}
+
 	if err := tmp.Close(); err != nil {
 		os.Remove(name)
 		return err
@@ -289,6 +344,20 @@ func writeAtomic(dest string, data []byte) error {
 	if err := os.Rename(name, dest); err != nil {
 		os.Remove(name)
 		return err
+	}
+	return nil
+}
+
+func ensureCacheDirectory(directory string) error {
+	if err := os.MkdirAll(directory, 0o755); err != nil {
+		return err
+	}
+	info, err := os.Stat(directory)
+	if err != nil {
+		return err
+	}
+	if info.Mode().Perm()&0o020 == 0 || info.Mode()&os.ModeSetgid == 0 {
+		return os.Chmod(directory, 0o2775)
 	}
 	return nil
 }
