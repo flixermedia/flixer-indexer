@@ -13,12 +13,12 @@ import (
 
 // Query identifies what to look up.
 type Query struct {
-	Title    string
-	Year     int
-	IDs      map[string]string
-	Language string
+	Title    string            `json:"title,omitempty"`
+	Year     int               `json:"year,omitempty"`
+	IDs      map[string]string `json:"ids,omitempty"`
+	Language string            `json:"language,omitempty"`
 	// Artist is set for album lookups.
-	Artist string
+	Artist string `json:"artist,omitempty"`
 }
 
 // Result is what a provider knows about an item.

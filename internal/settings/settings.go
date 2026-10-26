@@ -4,6 +4,7 @@ package settings
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"maps"
 	"sync"
@@ -12,7 +13,10 @@ import (
 	"github.com/flixermedia/flixer-indexer/internal/flixerclient"
 	"github.com/flixermedia/flixer-indexer/internal/models"
 	"github.com/flixermedia/flixer-indexer/internal/pipeline"
+	"github.com/flixermedia/flixer-indexer/internal/plugins/runner"
+	"github.com/flixermedia/flixer-indexer/internal/providers"
 	"github.com/flixermedia/flixer-indexer/internal/providers/registry"
+	"github.com/flixermedia/flixer-indexer/internal/providers/wasmplugin"
 )
 
 // Reloader polls flixer's settings.
@@ -24,6 +28,8 @@ type Reloader struct {
 	EnvKeys map[string]string
 	// EnvSubtitles is used while flixer has no OpenSubtitles API key.
 	EnvSubtitles models.SubtitleSettings
+	PluginsPath  string
+	PluginRunner *runner.Runner
 	UA           string
 	Language     string
 	Interval     time.Duration
@@ -32,6 +38,9 @@ type Reloader struct {
 	mu          sync.Mutex
 	lastConc    map[string]int
 	lastApplied bool
+	pluginMu    sync.RWMutex
+	pluginState []models.PluginRuntimeStatus
+	backend     map[string]models.PluginModule
 }
 
 // Reload fetches settings once and applies them. Concurrency is only touched
@@ -42,7 +51,51 @@ func (r *Reloader) Reload(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	reg := registry.Build(s, r.EnvKeys, r.UA, r.Language)
+	var extensions []providers.Provider
+	pluginState := make([]models.PluginRuntimeStatus, 0, len(s.Plugins))
+	backendModules := make(map[string]models.PluginModule)
+	for _, plugin := range s.Plugins {
+		indexerTarget := supportsIndexerCapability(plugin.Capabilities)
+		backendTarget := plugin.BackendEntry != "" && supportsBackendCapability(plugin.Capabilities)
+		if !indexerTarget && !backendTarget {
+			pluginState = append(pluginState, models.PluginRuntimeStatus{ID: plugin.ID, State: "error", Error: "no supported backend or indexer capability"})
+			continue
+		}
+		if r.PluginRunner == nil {
+			pluginState = append(pluginState, models.PluginRuntimeStatus{ID: plugin.ID, State: "error", Error: "WASI runtime is unavailable"})
+			continue
+		}
+
+		if backendTarget {
+			path, err := wasmplugin.ResolveModulePath(r.PluginsPath, plugin.ID, plugin.BackendEntry)
+			if err == nil {
+				err = r.PluginRunner.Validate(ctx, path)
+			}
+			if err != nil {
+				r.Log.Warn("skipping backend plugin", "plugin", plugin.ID, "error", err)
+				pluginState = append(pluginState, models.PluginRuntimeStatus{ID: plugin.ID, State: "error", Error: "backend module could not be loaded"})
+				continue
+			}
+			backendModules[plugin.ID] = plugin
+		}
+
+		if indexerTarget {
+			provider, err := wasmplugin.New(r.PluginsPath, plugin, r.PluginRunner)
+			if err != nil {
+				r.Log.Warn("skipping indexer plugin", "plugin", plugin.ID, "error", err)
+				delete(backendModules, plugin.ID)
+				pluginState = append(pluginState, models.PluginRuntimeStatus{ID: plugin.ID, State: "error", Error: "indexer module could not be loaded"})
+				continue
+			}
+			extensions = append(extensions, provider)
+		}
+		pluginState = append(pluginState, models.PluginRuntimeStatus{ID: plugin.ID, State: "registered"})
+	}
+	r.pluginMu.Lock()
+	r.pluginState = pluginState
+	r.backend = backendModules
+	r.pluginMu.Unlock()
+	reg := registry.Build(s, r.EnvKeys, r.UA, r.Language, extensions...)
 	r.Pipeline.SetRegistry(reg)
 	r.Log.Info("providers loaded", "providers", reg.Names(), "language", reg.Language())
 
@@ -71,6 +124,49 @@ func (r *Reloader) Reload(ctx context.Context) error {
 	}
 	r.lastConc, r.lastApplied = maps.Clone(s.Concurrency), true
 	return nil
+}
+
+func supportsIndexerCapability(capabilities []string) bool {
+	for _, capability := range capabilities {
+		switch capability {
+		case "indexer.provider.movie", "indexer.provider.series", "indexer.provider.season", "indexer.provider.episode", "indexer.provider.album", "indexer.provider.images":
+			return true
+		}
+	}
+	return false
+}
+
+func supportsBackendCapability(capabilities []string) bool {
+	for _, capability := range capabilities {
+		if capability == "api.routes" || capability == "backend.routes" {
+			return true
+		}
+	}
+	return false
+}
+
+// InvokePlugin executes an enabled backend route module in the constrained WASI runtime.
+func (r *Reloader) InvokePlugin(ctx context.Context, pluginID string, input []byte) ([]byte, error) {
+	r.pluginMu.RLock()
+	module, ok := r.backend[pluginID]
+	r.pluginMu.RUnlock()
+	if !ok {
+		return nil, errors.New("backend plugin is not registered")
+	}
+	if r.PluginRunner == nil {
+		return nil, errors.New("WASI runtime is unavailable")
+	}
+	path, err := wasmplugin.ResolveModulePath(r.PluginsPath, module.ID, module.BackendEntry)
+	if err != nil {
+		return nil, err
+	}
+	return r.PluginRunner.Run(ctx, path, input)
+}
+
+func (r *Reloader) PluginStatuses() []models.PluginRuntimeStatus {
+	r.pluginMu.RLock()
+	defer r.pluginMu.RUnlock()
+	return append([]models.PluginRuntimeStatus(nil), r.pluginState...)
 }
 
 // Run reloads on an interval until ctx ends.

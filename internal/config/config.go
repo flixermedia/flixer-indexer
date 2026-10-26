@@ -53,6 +53,7 @@ type Config struct {
 	// RedisFromEnv is true when REDIS_ADDR is set; otherwise flixer supplies the Redis settings.
 	RedisFromEnv      bool
 	CachePath         string
+	PluginsPath       string
 	LogDir            string
 	FFprobePath       string
 	FFmpegPath        string
@@ -195,6 +196,14 @@ func Load() (Config, error) {
 	if abs, err := filepath.Abs(cachePath); err == nil {
 		cachePath = abs
 	}
+	pluginsDefault := filepath.Join(dataPath, "plugins", "installed")
+	if dataPath == "" {
+		pluginsDefault = "./data/plugins/installed"
+	}
+	pluginsPath := envOrDefault("PLUGINS_PATH", pluginsDefault)
+	if abs, err := filepath.Abs(pluginsPath); err == nil {
+		pluginsPath = abs
+	}
 	logDir := strings.TrimSpace(os.Getenv("LOG_DIR"))
 	if logDir == "" && dataPath != "" {
 		logDir = filepath.Join(dataPath, "logs")
@@ -223,6 +232,7 @@ func Load() (Config, error) {
 		RedisTLS:          strings.EqualFold(os.Getenv("REDIS_TLS"), "true"),
 		RedisFromEnv:      strings.TrimSpace(os.Getenv("REDIS_ADDR")) != "",
 		CachePath:         cachePath,
+		PluginsPath:       pluginsPath,
 		LogDir:            logDir,
 		FFprobePath:       ffprobe,
 		FFmpegPath:        envOrDefault("FFMPEG_PATH", "ffmpeg"),

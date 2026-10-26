@@ -89,6 +89,28 @@ func TestAuthRequired(t *testing.T) {
 	}
 }
 
+func TestPluginStatusEndpointRequiresSignature(t *testing.T) {
+	h := newServer(t)
+	if rec := do(h, http.MethodGet, "/internal/plugins", nil, false); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unsigned plugin status = %d", rec.Code)
+	}
+	rec := do(h, http.MethodGet, "/internal/plugins", nil, true)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"plugins":[]`) {
+		t.Fatalf("plugin status = %d %s", rec.Code, rec.Body)
+	}
+}
+
+func TestPluginInvocationRequiresSignatureAndRuntime(t *testing.T) {
+	h := newServer(t)
+	payload := map[string]any{"pluginId": "flixer.example", "input": map[string]any{"apiVersion": 1}}
+	if rec := do(h, http.MethodPost, "/internal/plugins/invoke", payload, false); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unsigned plugin invocation = %d", rec.Code)
+	}
+	if rec := do(h, http.MethodPost, "/internal/plugins/invoke", payload, true); rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("invocation without a runtime = %d", rec.Code)
+	}
+}
+
 func TestScanAndInspect(t *testing.T) {
 	h := newServer(t)
 

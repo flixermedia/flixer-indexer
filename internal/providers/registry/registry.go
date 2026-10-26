@@ -30,24 +30,26 @@ var keyless = map[string]bool{"musicbrainz": true, "coverartarchive": true, "ani
 // Registry is an immutable set of providers; a new one is built whenever
 // flixer's settings change.
 type Registry struct {
-	movie    []providers.MovieProvider
-	series   []providers.SeriesProvider
-	anime    []providers.SeriesProvider
-	season   []providers.SeasonProvider
-	episode  []providers.EpisodeProvider
-	album    []providers.AlbumProvider
-	images   []providers.ImageProvider
-	discogs  *discogs.Provider
-	stats    map[string]*httpx.Stats
-	language string
-	cache    *providers.Cache
+	movie          []providers.MovieProvider
+	series         []providers.SeriesProvider
+	anime          []providers.SeriesProvider
+	season         []providers.SeasonProvider
+	episode        []providers.EpisodeProvider
+	album          []providers.AlbumProvider
+	images         []providers.ImageProvider
+	discogs        *discogs.Provider
+	stats          map[string]*httpx.Stats
+	language       string
+	cache          *providers.Cache
+	extensionNames []string
 }
 
 type statsProvider interface{ Stats() *httpx.Stats }
+type capabilityProvider interface{ Supports(string) bool }
 
 // Build creates the providers enabled by settings, falling back to the
 // environment-supplied keys where flixer has none.
-func Build(settings models.Settings, envKeys map[string]string, userAgent, defaultLanguage string) *Registry {
+func Build(settings models.Settings, envKeys map[string]string, userAgent, defaultLanguage string, extensions ...providers.Provider) *Registry {
 	r := &Registry{stats: map[string]*httpx.Stats{}, language: settings.Language, cache: providers.NewCache(30 * time.Minute)}
 	if r.language == "" {
 		r.language = defaultLanguage
@@ -150,7 +152,36 @@ func Build(settings models.Settings, envKeys map[string]string, userAgent, defau
 		track("coverartarchive", ca)
 		r.images = append(r.images, ca)
 	}
+	for _, extension := range extensions {
+		if extension == nil {
+			continue
+		}
+		r.extensionNames = append(r.extensionNames, extension.Name())
+		if provider, ok := extension.(providers.MovieProvider); ok && supports(extension, "indexer.provider.movie") {
+			r.movie = append(r.movie, provider)
+		}
+		if provider, ok := extension.(providers.SeriesProvider); ok && supports(extension, "indexer.provider.series") {
+			r.series = append(r.series, provider)
+		}
+		if provider, ok := extension.(providers.SeasonProvider); ok && supports(extension, "indexer.provider.season") {
+			r.season = append(r.season, provider)
+		}
+		if provider, ok := extension.(providers.EpisodeProvider); ok && supports(extension, "indexer.provider.episode") {
+			r.episode = append(r.episode, provider)
+		}
+		if provider, ok := extension.(providers.AlbumProvider); ok && supports(extension, "indexer.provider.album") {
+			r.album = append(r.album, provider)
+		}
+		if provider, ok := extension.(providers.ImageProvider); ok && supports(extension, "indexer.provider.images") {
+			r.images = append(r.images, provider)
+		}
+	}
 	return r
+}
+
+func supports(provider providers.Provider, capability string) bool {
+	declared, ok := provider.(capabilityProvider)
+	return !ok || declared.Supports(capability)
 }
 
 // Language is the metadata language providers are asked for.
@@ -175,9 +206,17 @@ func (r *Registry) Stats() map[string]httpx.Snapshot {
 
 // Names lists the enabled providers.
 func (r *Registry) Names() []string {
-	names := make([]string, 0, len(r.stats))
+	names := make([]string, 0, len(r.stats)+len(r.extensionNames))
+	seen := map[string]bool{}
 	for name := range r.stats {
 		names = append(names, name)
+		seen[name] = true
+	}
+	for _, name := range r.extensionNames {
+		if !seen[name] {
+			names = append(names, name)
+			seen[name] = true
+		}
 	}
 	slices.Sort(names)
 	return names
@@ -205,6 +244,12 @@ func (r *Registry) Restrict(names []string) *Registry {
 	out.episode = filter(r.episode, allowed)
 	out.album = filter(r.album, allowed)
 	out.images = filter(r.images, allowed)
+	out.extensionNames = make([]string, 0, len(r.extensionNames))
+	for _, name := range r.extensionNames {
+		if allowed[strings.ToLower(name)] {
+			out.extensionNames = append(out.extensionNames, name)
+		}
+	}
 	return &out
 }
 

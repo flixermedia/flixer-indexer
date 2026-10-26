@@ -78,6 +78,23 @@ type Settings struct {
 	Language    string                     `json:"language,omitempty"`
 	Subtitles   *SubtitleSettings          `json:"subtitles,omitempty"`
 	Themes      *ThemeSettings             `json:"themes,omitempty"`
+	Plugins     []PluginModule             `json:"plugins,omitempty"`
+}
+
+// PluginModule contains the enabled WASI entry points shared by Flixer at DATA_PATH/plugins/installed.
+type PluginModule struct {
+	ID           string   `json:"id"`
+	Version      string   `json:"version"`
+	Entry        string   `json:"entry"`
+	BackendEntry string   `json:"backendEntry,omitempty"`
+	Capabilities []string `json:"capabilities,omitempty"`
+}
+
+// PluginRuntimeStatus is the indexer's last settings-reload result for one module.
+type PluginRuntimeStatus struct {
+	ID    string `json:"id"`
+	State string `json:"state"`
+	Error string `json:"error,omitempty"`
 }
 
 // ThemeSettings switches ThemerrDB theme-song downloads on.

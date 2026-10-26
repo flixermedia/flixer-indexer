@@ -25,6 +25,7 @@ import (
 	"github.com/flixermedia/flixer-indexer/internal/models"
 	"github.com/flixermedia/flixer-indexer/internal/monitoring"
 	"github.com/flixermedia/flixer-indexer/internal/pipeline"
+	"github.com/flixermedia/flixer-indexer/internal/plugins/runner"
 	"github.com/flixermedia/flixer-indexer/internal/probe"
 	"github.com/flixermedia/flixer-indexer/internal/progress"
 	"github.com/flixermedia/flixer-indexer/internal/providers/registry"
@@ -82,6 +83,17 @@ func run() error {
 		log.Info("Sentry monitoring enabled")
 	}
 	defer flushSentry()
+
+	pluginRunner, pluginRuntimeErr := runner.New(ctx)
+	if pluginRuntimeErr != nil {
+		log.Warn("WASI plugin runtime unavailable; indexer plugins are disabled", "error", pluginRuntimeErr)
+	} else {
+		defer func() {
+			if err := pluginRunner.Close(context.Background()); err != nil {
+				log.Warn("close WASI plugin runtime", "error", err)
+			}
+		}()
+	}
 
 	if !cfg.RedisFromEnv && !cfg.Stub {
 		remote, err := remoteconfig.Wait(ctx, cfg.FlixerURL, cfg.Secret, log)
@@ -143,6 +155,7 @@ func run() error {
 	reloader := &settings.Reloader{
 		Client: client, Pipeline: pipe, Pool: pool, EnvKeys: cfg.ProviderKeys, EnvSubtitles: envSubs,
 		UA: cfg.UserAgent, Language: cfg.Language, Interval: time.Minute, Log: log,
+		PluginsPath: cfg.PluginsPath, PluginRunner: pluginRunner,
 	}
 	// Start with the environment's settings so work can run even when flixer is down.
 	if err := reloader.Reload(ctx); err != nil {

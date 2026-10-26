@@ -83,8 +83,56 @@ func (s *Server) Handler() http.Handler {
 	signed.HandleFunc("POST /internal/subtitles/download", s.subtitleDownload)
 	signed.HandleFunc("POST /internal/subtitles/delete", s.subtitleDelete)
 	signed.HandleFunc("POST /internal/settings/reload", s.reload)
+	signed.HandleFunc("GET /internal/plugins", s.plugins)
+	signed.HandleFunc("POST /internal/plugins/invoke", s.invokePlugin)
 	mux.Handle("/internal/", s.authenticate(signed))
 	return mux
+}
+
+func (s *Server) plugins(w http.ResponseWriter, _ *http.Request) {
+	if s.Reloader == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"plugins": []models.PluginRuntimeStatus{}})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"plugins": s.Reloader.PluginStatuses()})
+}
+
+func (s *Server) invokePlugin(w http.ResponseWriter, r *http.Request) {
+	if s.Reloader == nil {
+		writeError(w, http.StatusServiceUnavailable, "plugin runtime is unavailable")
+		return
+	}
+	var request struct {
+		PluginID string          `json:"pluginId"`
+		Input    json.RawMessage `json:"input"`
+	}
+	if !decode(w, r, &request) {
+		return
+	}
+	if request.PluginID == "" || len(request.Input) == 0 || !json.Valid(request.Input) {
+		writeError(w, http.StatusBadRequest, "pluginId and a valid JSON input are required")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	output, err := s.Reloader.InvokePlugin(ctx, request.PluginID, request.Input)
+	if err != nil {
+		s.Log.Warn("backend plugin invocation failed", "plugin", request.PluginID, "error", err)
+		writeError(w, http.StatusBadGateway, "plugin invocation failed")
+		return
+	}
+	var response map[string]json.RawMessage
+	if !json.Valid(output) || json.Unmarshal(output, &response) != nil || response == nil {
+		writeError(w, http.StatusBadGateway, "plugin returned an invalid response")
+		return
+	}
+	if _, hasResult := response["result"]; !hasResult {
+		writeError(w, http.StatusBadGateway, "plugin response is missing its result")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(output)
 }
 
 type ctxKey struct{}
