@@ -1,5 +1,5 @@
 // Package lyrics finds LRC lyrics next to audio files and downloads missing
-// ones from lrclib.net, saving them under DATA_DIR/cache/lyrics/<track id>.lrc.
+// ones from lrclib.net, saving them next to the audio, or under DATA_DIR/cache/lyrics/<track id>.lrc when that folder is read-only.
 package lyrics
 
 import (
@@ -370,13 +370,13 @@ func (f *Fetcher) Fetch(ctx context.Context, q Query) (string, error) {
 // Ensure makes sure lyrics exist for the track, either as a sidecar next to
 // the audio or in the store directory under the track's id. It returns true
 // when lyrics are available afterwards. A download is attempted only when f is
-// set, and is saved to the store.
+// set, and is saved next to the audio when that folder is writable, else to the store.
 func Ensure(ctx context.Context, f *Fetcher, audio, storeDir, id string, q Query) (bool, error) {
 	store := StorePath(storeDir, id)
 	if Exists(audio) || (store != "" && nonEmpty(store)) {
 		return true, nil
 	}
-	if f == nil || store == "" {
+	if f == nil {
 		return false, nil
 	}
 	text, err := f.Fetch(ctx, q)
@@ -386,23 +386,37 @@ func Ensure(ctx context.Context, f *Fetcher, audio, storeDir, id string, q Query
 	if err != nil {
 		return false, err
 	}
+	// Next to the audio is preferred so the lyrics travel with the library; a read-only share falls back to the store.
+	sidecarErr := writeAtomic(filepath.Dir(audio), Path(audio), text)
+	if sidecarErr == nil {
+		return true, nil
+	}
+	if store == "" {
+		return false, sidecarErr
+	}
 	if err := os.MkdirAll(storeDir, 0o755); err != nil {
 		return false, err
 	}
-	tmp, err := os.CreateTemp(storeDir, ".lrc-*")
-	if err != nil {
+	if err := writeAtomic(storeDir, store, text); err != nil {
 		return false, err
+	}
+	return true, nil
+}
+
+func writeAtomic(dir, dest, text string) error {
+	tmp, err := os.CreateTemp(dir, ".lrc-*")
+	if err != nil {
+		return err
 	}
 	_, werr := tmp.WriteString(text)
 	if cerr := tmp.Close(); werr == nil {
 		werr = cerr
 	}
 	if werr == nil {
-		werr = os.Rename(tmp.Name(), store)
+		werr = os.Rename(tmp.Name(), dest)
 	}
 	if werr != nil {
 		os.Remove(tmp.Name())
-		return false, werr
 	}
-	return true, nil
+	return werr
 }

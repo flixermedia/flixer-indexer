@@ -48,7 +48,7 @@ func TestCleanTitle(t *testing.T) {
 	}
 }
 
-func TestEnsureStoresByTrackID(t *testing.T) {
+func TestEnsureWritesBesideAudioThenFallsBackToStore(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("track_name") != "Song" {
 			http.NotFound(w, r)
@@ -59,25 +59,37 @@ func TestEnsureStoresByTrackID(t *testing.T) {
 	defer srv.Close()
 	f := NewFetcher("test")
 	f.BaseURL = srv.URL
+	q := Query{Artist: "A", Title: "Song"}
 
 	store := filepath.Join(t.TempDir(), "lyrics")
 	audio := filepath.Join(t.TempDir(), "Song.wav")
-	ok, err := Ensure(context.Background(), f, audio, store, "abc-123", Query{Artist: "A", Title: "Song"})
-	if err != nil || !ok {
+	if ok, err := Ensure(context.Background(), f, audio, store, "abc-123", q); err != nil || !ok {
 		t.Fatalf("Ensure = %v, %v", ok, err)
 	}
-	data, _ := os.ReadFile(filepath.Join(store, "abc-123.lrc"))
-	if string(data) != "[00:01.00]Hello" {
-		t.Fatalf("unexpected stored lyrics %q", data)
+	if data, _ := os.ReadFile(Path(audio)); string(data) != "[00:01.00]Hello" {
+		t.Fatalf("expected a sidecar beside the audio, got %q", data)
 	}
-	if _, err := os.Stat(Path(audio)); err == nil {
-		t.Fatal("nothing should be written beside the audio")
+	if _, err := os.Stat(filepath.Join(store, "abc-123.lrc")); err == nil {
+		t.Fatal("the store should be unused when the folder is writable")
 	}
 
-	if ok, err := Ensure(context.Background(), f, audio, store, "other", Query{Artist: "A", Title: "Other"}); ok || err != nil {
+	// A folder that cannot be written (here: its parent is a file) falls back to the store.
+	blocker := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(blocker, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	locked := filepath.Join(blocker, "Song.wav")
+	if ok, err := Ensure(context.Background(), f, locked, store, "abc-123", q); err != nil || !ok {
+		t.Fatalf("Ensure = %v, %v", ok, err)
+	}
+	if data, _ := os.ReadFile(filepath.Join(store, "abc-123.lrc")); string(data) != "[00:01.00]Hello" {
+		t.Fatalf("unexpected stored lyrics %q", data)
+	}
+
+	if ok, err := Ensure(context.Background(), f, filepath.Join(t.TempDir(), "Other.wav"), store, "other", Query{Artist: "A", Title: "Other"}); ok || err != nil {
 		t.Fatalf("missing lyrics should be (false, nil), got %v, %v", ok, err)
 	}
-	if ok, _ := Ensure(context.Background(), nil, audio, store, "../escape", Query{}); ok {
+	if ok, _ := Ensure(context.Background(), nil, locked, store, "../escape", Query{}); ok {
 		t.Fatal("unsafe ids must be refused")
 	}
 }
