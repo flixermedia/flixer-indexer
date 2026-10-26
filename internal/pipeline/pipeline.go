@@ -37,6 +37,7 @@ const (
 	TypeRefresh   = "refresh:item"
 	TypeTrickplay = "trickplay:item"
 	TypeThemes    = "themes:item"
+	TypeLyrics    = "lyrics:item"
 )
 
 const (
@@ -152,6 +153,8 @@ func queueTimeout(queue string) time.Duration {
 		return 3 * time.Hour
 	case config.QueueThemes:
 		return 15 * time.Minute
+	case config.QueueLyrics:
+		return 3 * time.Minute
 	default:
 		return 5 * time.Minute
 	}
@@ -238,6 +241,7 @@ func (p *Pipeline) handlers() map[string]map[string]asynq.HandlerFunc {
 		config.QueueRefresh:   {TypeRefresh: p.handleRefresh},
 		config.QueueTrickplay: {TypeTrickplay: p.handleTrickplay},
 		config.QueueThemes:    {TypeThemes: p.handleThemes},
+		config.QueueLyrics:    {TypeLyrics: p.handleLyrics},
 	}
 }
 
@@ -252,7 +256,7 @@ func (p *Pipeline) OnError(ctx context.Context, task *asynq.Task, err error) {
 		level = slog.LevelError
 	}
 	p.Log.Log(ctx, level, "task failed", "type", task.Type(), "retry", retried, "terminal", terminal, "error", err)
-	if !terminal || task.Type() == TypeScan || task.Type() == TypeRefresh || task.Type() == TypeTrickplay {
+	if !terminal || task.Type() == TypeScan || task.Type() == TypeRefresh || task.Type() == TypeTrickplay || task.Type() == TypeLyrics {
 		return
 	}
 	var w models.Work
@@ -274,7 +278,7 @@ func TaskSubject(typ string, payload []byte) (libraryID, itemType, path string) 
 		if json.Unmarshal(payload, &req) == nil {
 			libraryID, itemType, path = req.LibraryID, req.ItemType, req.Path
 		}
-	case TypeTrickplay, TypeThemes:
+	case TypeTrickplay, TypeThemes, TypeLyrics:
 		var task struct {
 			LibraryID string `json:"libraryId"`
 			ItemType  string `json:"itemType"`

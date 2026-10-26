@@ -15,7 +15,6 @@ import (
 	"github.com/flixermedia/flixer-indexer/internal/config"
 	"github.com/flixermedia/flixer-indexer/internal/flixerclient"
 	"github.com/flixermedia/flixer-indexer/internal/images"
-	"github.com/flixermedia/flixer-indexer/internal/lyrics"
 	"github.com/flixermedia/flixer-indexer/internal/models"
 	"github.com/flixermedia/flixer-indexer/internal/naming"
 	"github.com/flixermedia/flixer-indexer/internal/nfo"
@@ -226,29 +225,6 @@ func (p *Pipeline) handleIdentify(ctx context.Context, t *asynq.Task) error {
 
 	_, err = p.Enqueue(ctx, config.QueueMetadata, TypeMetadata, w, maxRetry)
 	return err
-}
-
-// ensureLyrics stores a missing .lrc under LyricsDir/<track id>.lrc, which works
-// for read-only libraries. Failures only log; lyrics are optional.
-func (p *Pipeline) ensureLyrics(ctx context.Context, item *models.Item, h models.Hints, id string) {
-	m := item.Metadata
-	q := lyrics.Query{
-		Artist:      firstNonEmpty(m.Artist, h.Artist),
-		AlbumArtist: m.AlbumArtist,
-		Title:       firstNonEmpty(m.Title, h.Title),
-		Album:       firstNonEmpty(m.Album, h.Album),
-	}
-	if item.Technical != nil {
-		q.Duration = item.Technical.Duration
-	}
-	found, err := lyrics.Ensure(ctx, p.Lyrics, item.Path, p.LyricsDir, id, q)
-	if err != nil {
-		p.logger(ctx).Warn("lyrics unavailable", "path", item.Path, "error", err)
-		return
-	}
-	if found {
-		p.logger(ctx).Debug("lyrics ready", "path", item.Path, "id", id)
-	}
 }
 
 // applyTags lets embedded audio tags override names derived from the path.
@@ -549,7 +525,7 @@ func (p *Pipeline) handleProbe(ctx context.Context, t *asynq.Task) error {
 		return err
 	}
 	if item.Type == models.ItemTrack {
-		p.ensureLyrics(ctx, item, w.Hints, id)
+		p.queueLyrics(ctx, item, w.Hints, id)
 	}
 	if p.TrickplayEnabled && (item.Type == models.ItemMovie || item.Type == models.ItemEpisode || item.Type == models.ItemVideo) && item.RootID != "" && item.RelativePath != "" {
 		task := trickplay.Task{LibraryID: item.LibraryID, Path: item.Path, RootID: item.RootID, RelativePath: item.RelativePath}

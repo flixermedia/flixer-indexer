@@ -1,5 +1,5 @@
 // Package lyrics finds LRC lyrics next to audio files and downloads missing
-// ones from lrclib.net, saving them under DATA_DIR/lyrics/<track id>.lrc.
+// ones from lrclib.net, saving them under DATA_DIR/cache/lyrics/<track id>.lrc.
 package lyrics
 
 import (
@@ -232,6 +232,9 @@ func (f *Fetcher) get(ctx context.Context, endpoint string, params url.Values, o
 			continue
 		case resp.StatusCode != http.StatusOK:
 			resp.Body.Close()
+			if resp.StatusCode >= 500 {
+				f.holdOff(retryAfter("", 1))
+			}
 			return fmt.Errorf("lrclib: unexpected status %d", resp.StatusCode)
 		}
 		err = json.NewDecoder(io.LimitReader(resp.Body, maxBody)).Decode(out)

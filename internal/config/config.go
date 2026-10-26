@@ -22,10 +22,11 @@ const (
 	QueueRefresh   = "refresh"
 	QueueTrickplay = "trickplay"
 	QueueThemes    = "themes"
+	QueueLyrics    = "lyrics"
 )
 
 // Queues lists every queue in pipeline order.
-var Queues = []string{QueueScan, QueueIdentify, QueueMetadata, QueueImages, QueueProbe, QueueRefresh, QueueTrickplay, QueueThemes}
+var Queues = []string{QueueScan, QueueIdentify, QueueMetadata, QueueImages, QueueProbe, QueueRefresh, QueueTrickplay, QueueThemes, QueueLyrics}
 
 // MaxConcurrency caps what an admin can set for a single queue.
 const MaxConcurrency = 64
@@ -152,7 +153,7 @@ func Load() (Config, error) {
 
 	defaults := map[string]int{
 		QueueScan: 2, QueueIdentify: 12, QueueMetadata: 12,
-		QueueImages: 8, QueueProbe: 12, QueueRefresh: 4, QueueTrickplay: 6, QueueThemes: 6,
+		QueueImages: 8, QueueProbe: 12, QueueRefresh: 4, QueueTrickplay: 6, QueueThemes: 6, QueueLyrics: 2,
 	}
 	concurrency := make(map[string]int, len(defaults))
 	for queue, fallback := range defaults {
