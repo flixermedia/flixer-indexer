@@ -53,7 +53,7 @@ type Config struct {
 	// RedisFromEnv is true when REDIS_ADDR is set; otherwise flixer supplies the Redis settings.
 	RedisFromEnv bool
 	CachePath    string
-	// LyricsDir holds downloaded lyrics as <track id>.lrc (DATA_DIR/lyrics).
+	// LyricsDir holds downloaded lyrics as <track id>.lrc (DATA_DIR/cache/lyrics).
 	LyricsDir         string
 	PluginsPath       string
 	LogDir            string
@@ -198,9 +198,9 @@ func Load() (Config, error) {
 	if abs, err := filepath.Abs(cachePath); err == nil {
 		cachePath = abs
 	}
-	lyricsDefault := filepath.Join(dataPath, "lyrics")
+	lyricsDefault := filepath.Join(dataPath, "cache", "lyrics")
 	if dataPath == "" {
-		lyricsDefault = "./data/lyrics"
+		lyricsDefault = "./cache/lyrics"
 	}
 	lyricsDir := envOrDefault("LYRICS_PATH", lyricsDefault)
 	if abs, err := filepath.Abs(lyricsDir); err == nil {
