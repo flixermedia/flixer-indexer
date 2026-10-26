@@ -56,10 +56,12 @@ type Pipeline struct {
 	Images *images.Store
 	Probe  Prober
 	// Lyrics downloads missing .lrc files; nil keeps lyrics local-only.
-	Lyrics   *lyrics.Fetcher
-	Progress *progress.Tracker
-	Queue    *asynq.Client
-	Log      *slog.Logger
+	Lyrics *lyrics.Fetcher
+	// LyricsDir is where downloaded lyrics are stored as <track id>.lrc.
+	LyricsDir string
+	Progress  *progress.Tracker
+	Queue     *asynq.Client
+	Log       *slog.Logger
 	// TaskLogs records each task's log output; nil disables it.
 	TaskLogs         *tasklog.Store
 	Trickplay        *trickplay.Generator

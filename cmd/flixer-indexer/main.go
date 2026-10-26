@@ -139,6 +139,7 @@ func run() error {
 	pipe.Themes = themes.NewFetcher(cfg.CachePath, cfg.FFmpegPath, cfg.UserAgent)
 	pipe.SetTrickplay(cfg.TrickplayEnabled, cfg.TrickplayDir, cfg.FFmpegPath, cfg.TrickplayInterval, cfg.TrickplayWidth)
 
+	pipe.LyricsDir = cfg.LyricsDir
 	if cfg.LyricsFetch {
 		pipe.Lyrics = lyrics.NewFetcher(cfg.UserAgent)
 	}

@@ -1,5 +1,5 @@
 // Package lyrics finds LRC lyrics next to audio files and downloads missing
-// ones from lrclib.net, saving them beside the audio as "<name>.lrc".
+// ones from lrclib.net, saving them under DATA_DIR/lyrics/<track id>.lrc.
 package lyrics
 
 import (
@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 )
@@ -30,6 +31,59 @@ type Fetcher struct {
 	BaseURL   string
 	UserAgent string
 	HTTP      *http.Client
+
+	mu   sync.Mutex
+	next time.Time
+}
+
+const (
+	requestGap     = 300 * time.Millisecond
+	maxRateRetries = 4
+	maxRetryWait   = 30 * time.Second
+)
+
+// pace spaces requests out so a burst of new tracks does not trip lrclib's rate limit.
+func (f *Fetcher) pace(ctx context.Context) error {
+	f.mu.Lock()
+	now := time.Now()
+	at := f.next
+	if at.Before(now) {
+		at = now
+	}
+	f.next = at.Add(requestGap)
+	f.mu.Unlock()
+	return sleep(ctx, time.Until(at))
+}
+
+// holdOff pushes every queued request back after lrclib answers 429.
+func (f *Fetcher) holdOff(d time.Duration) {
+	f.mu.Lock()
+	if until := time.Now().Add(d); until.After(f.next) {
+		f.next = until
+	}
+	f.mu.Unlock()
+}
+
+func sleep(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return ctx.Err()
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
+
+func retryAfter(h string, attempt int) time.Duration {
+	wait := 2 * time.Second << attempt
+	if secs, err := strconv.Atoi(strings.TrimSpace(h)); err == nil && secs > 0 {
+		wait = time.Duration(secs) * time.Second
+	}
+	return min(wait, maxRetryWait)
 }
 
 func NewFetcher(userAgent string) *Fetcher {
@@ -45,6 +99,22 @@ type Query struct {
 // Path returns the sidecar LRC path for an audio file.
 func Path(audio string) string {
 	return strings.TrimSuffix(audio, filepath.Ext(audio)) + ".lrc"
+}
+
+var safeID = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
+// StorePath is where downloaded lyrics for a track live, so read-only libraries still get them.
+// It returns "" when the id or directory is unusable.
+func StorePath(dir, id string) string {
+	if dir == "" || !safeID.MatchString(id) {
+		return ""
+	}
+	return filepath.Join(dir, id+".lrc")
+}
+
+func nonEmpty(path string) bool {
+	st, err := os.Stat(path)
+	return err == nil && !st.IsDir() && st.Size() > 0
 }
 
 // Exists reports whether a sidecar lyrics file is already present.
@@ -136,25 +206,38 @@ func titleVariants(title string) []string {
 }
 
 func (f *Fetcher) get(ctx context.Context, endpoint string, params url.Values, out any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(f.BaseURL, "/")+endpoint+"?"+params.Encode(), nil)
-	if err != nil {
+	for attempt := 0; ; attempt++ {
+		if err := f.pace(ctx); err != nil {
+			return err
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(f.BaseURL, "/")+endpoint+"?"+params.Encode(), nil)
+		if err != nil {
+			return err
+		}
+		if f.UserAgent != "" {
+			req.Header.Set("User-Agent", f.UserAgent)
+		}
+		resp, err := f.HTTP.Do(req)
+		if err != nil {
+			return err
+		}
+		switch {
+		case resp.StatusCode == http.StatusNotFound:
+			resp.Body.Close()
+			return ErrNotFound
+		case resp.StatusCode == http.StatusTooManyRequests && attempt < maxRateRetries:
+			wait := retryAfter(resp.Header.Get("Retry-After"), attempt)
+			resp.Body.Close()
+			f.holdOff(wait)
+			continue
+		case resp.StatusCode != http.StatusOK:
+			resp.Body.Close()
+			return fmt.Errorf("lrclib: unexpected status %d", resp.StatusCode)
+		}
+		err = json.NewDecoder(io.LimitReader(resp.Body, maxBody)).Decode(out)
+		resp.Body.Close()
 		return err
 	}
-	if f.UserAgent != "" {
-		req.Header.Set("User-Agent", f.UserAgent)
-	}
-	resp, err := f.HTTP.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNotFound {
-		return ErrNotFound
-	}
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("lrclib: unexpected status %d", resp.StatusCode)
-	}
-	return json.NewDecoder(io.LimitReader(resp.Body, maxBody)).Decode(out)
 }
 
 // exact asks lrclib for the one record matching the tags; it is the most
@@ -281,13 +364,16 @@ func (f *Fetcher) Fetch(ctx context.Context, q Query) (string, error) {
 	return "", ErrNotFound
 }
 
-// Ensure makes sure a sidecar exists for the audio file. It returns true when
-// lyrics are available afterwards. A download is attempted only when f is set.
-func Ensure(ctx context.Context, f *Fetcher, audio string, q Query) (bool, error) {
-	if Exists(audio) {
+// Ensure makes sure lyrics exist for the track, either as a sidecar next to
+// the audio or in the store directory under the track's id. It returns true
+// when lyrics are available afterwards. A download is attempted only when f is
+// set, and is saved to the store.
+func Ensure(ctx context.Context, f *Fetcher, audio, storeDir, id string, q Query) (bool, error) {
+	store := StorePath(storeDir, id)
+	if Exists(audio) || (store != "" && nonEmpty(store)) {
 		return true, nil
 	}
-	if f == nil {
+	if f == nil || store == "" {
 		return false, nil
 	}
 	text, err := f.Fetch(ctx, q)
@@ -297,8 +383,23 @@ func Ensure(ctx context.Context, f *Fetcher, audio string, q Query) (bool, error
 	if err != nil {
 		return false, err
 	}
-	if err := os.WriteFile(Path(audio), []byte(text), 0o644); err != nil {
+	if err := os.MkdirAll(storeDir, 0o755); err != nil {
 		return false, err
+	}
+	tmp, err := os.CreateTemp(storeDir, ".lrc-*")
+	if err != nil {
+		return false, err
+	}
+	_, werr := tmp.WriteString(text)
+	if cerr := tmp.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr == nil {
+		werr = os.Rename(tmp.Name(), store)
+	}
+	if werr != nil {
+		os.Remove(tmp.Name())
+		return false, werr
 	}
 	return true, nil
 }

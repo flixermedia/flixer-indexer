@@ -222,16 +222,15 @@ func (p *Pipeline) handleIdentify(ctx context.Context, t *asynq.Task) error {
 			item.Technical = &res.Technical
 			applyTags(item, res.Tags)
 		}
-		p.ensureLyrics(ctx, item, w.Hints)
 	}
 
 	_, err = p.Enqueue(ctx, config.QueueMetadata, TypeMetadata, w, maxRetry)
 	return err
 }
 
-// ensureLyrics keeps a sidecar .lrc next to the track, downloading it when missing.
-// Failures (e.g. a read-only library) only log; lyrics are optional.
-func (p *Pipeline) ensureLyrics(ctx context.Context, item *models.Item, h models.Hints) {
+// ensureLyrics stores a missing .lrc under LyricsDir/<track id>.lrc, which works
+// for read-only libraries. Failures only log; lyrics are optional.
+func (p *Pipeline) ensureLyrics(ctx context.Context, item *models.Item, h models.Hints, id string) {
 	m := item.Metadata
 	q := lyrics.Query{
 		Artist:      firstNonEmpty(m.Artist, h.Artist),
@@ -242,13 +241,13 @@ func (p *Pipeline) ensureLyrics(ctx context.Context, item *models.Item, h models
 	if item.Technical != nil {
 		q.Duration = item.Technical.Duration
 	}
-	found, err := lyrics.Ensure(ctx, p.Lyrics, item.Path, q)
+	found, err := lyrics.Ensure(ctx, p.Lyrics, item.Path, p.LyricsDir, id, q)
 	if err != nil {
 		p.logger(ctx).Warn("lyrics unavailable", "path", item.Path, "error", err)
 		return
 	}
 	if found {
-		p.logger(ctx).Debug("lyrics ready", "path", lyrics.Path(item.Path))
+		p.logger(ctx).Debug("lyrics ready", "path", item.Path, "id", id)
 	}
 }
 
@@ -542,11 +541,15 @@ func (p *Pipeline) handleProbe(ctx context.Context, t *asynq.Task) error {
 		return err
 	}
 	finalize(&w, p.folderRoot(lib, item.Path))
-	if _, err := p.Client.UpsertItem(ctx, *item); err != nil {
+	id, err := p.Client.UpsertItem(ctx, *item)
+	if err != nil {
 		if errors.Is(err, flixerclient.ErrPermanent) {
 			return fmt.Errorf("%w: %w", err, asynq.SkipRetry)
 		}
 		return err
+	}
+	if item.Type == models.ItemTrack {
+		p.ensureLyrics(ctx, item, w.Hints, id)
 	}
 	if p.TrickplayEnabled && (item.Type == models.ItemMovie || item.Type == models.ItemEpisode || item.Type == models.ItemVideo) && item.RootID != "" && item.RelativePath != "" {
 		task := trickplay.Task{LibraryID: item.LibraryID, Path: item.Path, RootID: item.RootID, RelativePath: item.RelativePath}
