@@ -121,18 +121,27 @@ func (s *Server) invokePlugin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "plugin invocation failed")
 		return
 	}
-	var response map[string]json.RawMessage
-	if !json.Valid(output) || json.Unmarshal(output, &response) != nil || response == nil {
-		writeError(w, http.StatusBadGateway, "plugin returned an invalid response")
-		return
-	}
-	if _, hasResult := response["result"]; !hasResult {
-		writeError(w, http.StatusBadGateway, "plugin response is missing its result")
+	if message := checkPluginResponse(output); message != "" {
+		writeError(w, http.StatusBadGateway, message)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(output)
+}
+
+// checkPluginResponse returns why a module's output is unusable, or "" when it is a final result or a request for host calls.
+func checkPluginResponse(output []byte) string {
+	var response map[string]json.RawMessage
+	if !json.Valid(output) || json.Unmarshal(output, &response) != nil || response == nil {
+		return "plugin returned an invalid response"
+	}
+	_, hasResult := response["result"]
+	_, hasHostCalls := response["hostCalls"]
+	if !hasResult && !hasHostCalls {
+		return "plugin response is missing its result"
+	}
+	return ""
 }
 
 type ctxKey struct{}

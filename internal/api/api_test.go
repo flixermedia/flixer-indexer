@@ -164,3 +164,18 @@ func TestTaskLogsEndpoint(t *testing.T) {
 		t.Fatalf("unsigned = %d", rec.Code)
 	}
 }
+
+func TestCheckPluginResponse(t *testing.T) {
+	for output, wantOK := range map[string]bool{
+		`{"result":{"ok":true}}`:                         true,
+		`{"hostCalls":[{"id":"a"}],"continuation":null}`: true,
+		`{"storage":{}}`:                                 false,
+		`{"error":{"code":"x"}}`:                         false,
+		`null`:                                           false,
+		`not json`:                                       false,
+	} {
+		if got := checkPluginResponse([]byte(output)) == ""; got != wantOK {
+			t.Errorf("checkPluginResponse(%s) accepted = %v, want %v", output, got, wantOK)
+		}
+	}
+}
