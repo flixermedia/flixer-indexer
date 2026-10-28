@@ -1,88 +1,124 @@
-# flixer-indexer
+<div align="center">
 
-Go service that scans flixer's media libraries, identifies items, fetches metadata and artwork, probes media files, and saves results back to flixer.
+<img src="https://raw.githubusercontent.com/flixermedia/flixer/main/resources/logo/flixer-logo.png" alt="Flixer logo" width="112" />
 
-## Pipeline
+# Flixer Indexer
 
-`scan:library` → `identify:item` → `metadata:fetch` → `images:fetch` → `probe:item` (finalizes and upserts to flixer). `trickplay:item` builds hover-seek thumbnail sheets after a successful video upsert. `refresh:item` re-processes a single path.
+**From media files to a beautifully organised library.**
 
-Each stage is an Asynq queue (Redis) with its own worker pool; concurrency can be changed at runtime from flixer.
+[![Stars](https://img.shields.io/github/stars/flixermedia/flixer-indexer?style=flat-square)](https://github.com/flixermedia/flixer-indexer/stargazers) [![Issues](https://img.shields.io/github/issues/flixermedia/flixer-indexer?style=flat-square)](https://github.com/flixermedia/flixer-indexer/issues)
 
-- Local NFO files and local artwork win; remote metadata/images only fill gaps.
-- Providers: TMDB, TVDB, OMDb, Fanart.tv, AniList, AniDB (aid only), MusicBrainz/Cover Art Archive, TheAudioDB, Discogs.
-- Artwork is stored alongside media or in `CACHE_PATH/images/{media-id}`, per library setting. The media ID is a stable hash of its library root ID and relative path.
-- People photos are cached in `CACHE_PATH/people/{person-id}.jpg`; themes and subtitles are cached under `CACHE_PATH/theme/{media-id}` and `CACHE_PATH/subtitles/{media-id}`.
+[Flixer](https://github.com/flixermedia/flixer) · [Documentation](https://github.com/flixermedia/flixer-docs) · [Report an issue](https://github.com/flixermedia/flixer-indexer/issues)
 
-## Running
+</div>
 
-```
+---
+
+> [!WARNING]
+> **Under active development.** Flixer components and integration contracts may change. Check current source and release notes before upgrading production installations.
+
+> [!NOTE]
+> **Role in Flixer:** The Go worker and API service for discovering, identifying, probing, and enriching media. For an end-to-end deployment, start with the [Flixer backend repository](https://github.com/flixermedia/flixer).
+
+## ✨ Features
+
+- **Staged ingestion:** Scan, identify, fetch metadata/images, probe and upsert items.
+- **Queue-backed jobs:** Dedicated Redis/Asynq worker pools with adjustable concurrency.
+- **Metadata sources:** TMDB, TVDB, OMDb, Fanart.tv, AniList, MusicBrainz and others.
+- **Local-first metadata:** NFO files and accompanying artwork take precedence.
+- **Media analysis:** FFmpeg/FFprobe and trickplay thumbnail generation.
+- **Incremental updates:** Folder watching, item refresh and periodic rescans.
+
+## 🏗️ Architecture
+
+Flixer separates application logic from its web UI, media indexing, media delivery, update management, plugins and documentation. **Flixer Indexer** owns the following responsibility: the Go worker and API service for discovering, identifying, probing, and enriching media.
+
+For the full platform, the API coordinates services; the browser interacts with the backend and the streamer receives authorised playback requests. Components should be operated as part of the supported Flixer stack unless you are developing or testing them directly.
+
+## 🚀 Getting started
+
+### Run from source
+
+Requires Go, Redis, FFmpeg and FFprobe. Run alongside a compatible Flixer API.
+
+```bash
+git clone https://github.com/flixermedia/flixer-indexer.git
+cd flixer-indexer
+cp .env.example .env
+# Set FLIXER_URL, APP_SECRET and REDIS_ADDR
 go run ./cmd/flixer-indexer
 ```
 
-Requires Redis, and `ffprobe`/`ffmpeg` on PATH (or `FFPROBE_PATH`/`FFMPEG_PATH`). See [.env.example](.env.example) for all variables.
+For Docker, use the provided `docker-compose.yml` or the main Flixer stack. The worker needs access to the same media locations as Flixer; write access may be needed if artwork is stored alongside files.
 
-| Variable | Default | Notes |
-| --- | --- | --- |
-| `PORT` | 8092 | |
-| `ROLE` | all | `all`, `api` or `worker` |
-| `FLIXER_URL` | http://localhost:8083 | alias `FLIXER_INTERNAL_URL`. At startup the indexer also asks flixer whether Sentry is enabled (toggle it in the admin dashboard); if flixer is unreachable it starts with Sentry off |
-| `APP_SECRET` | — | shared HMAC secret (falls back to `JWT_SECRET`) |
-| `REDIS_ADDR` | localhost:6379 | |
-| `CACHE_PATH` | ./cache | Root for people, artwork, theme, subtitle and trickplay caches |
-| `TRICKPLAY_ENABLED` | true | Automatically queue hover-seek sheets for movies, episodes and videos after indexing |
-| `TRICKPLAY_DIR` | `<CACHE_PATH>/trickplay` | Shared thumbnail cache; mount read-only into the streamer |
-| `TRICKPLAY_INTERVAL` | 10 | Thumbnail spacing in seconds (2–60) |
-| `TRICKPLAY_WIDTH` | 320 | Thumbnail width in pixels (80–640); generated height preserves aspect ratio |
-| `WATCH_FOLDERS` | true | watch library folders and auto-scan after changes settle |
-| `WATCH_DEBOUNCE` | 30s | quiet time before an auto-scan is queued |
-| `WATCH_RESCAN_INTERVAL` | 0 (off) | periodic scan for SMB/NFS mounts that emit no file events, e.g. `15m` |
-| `FLIXER_MODE` | — | `stub` reads `STUB_LIBRARIES_FILE` (`{"libraries":[...]}`) and appends items to `STUB_OUTPUT_FILE` |
+## 🏗️ Processing pipeline
 
-Provider keys (`TMDB_API_KEY`, `TVDB_API_KEY`, `OMDB_API_KEY`, `FANART_API_KEY`, `AUDIODB_API_KEY`, `DISCOGS_TOKEN`, `ANIDB_CLIENT`) are fallbacks; flixer's settings take precedence.
-
-## Docker
-
-```yaml
-services:
-  redis:
-    image: redis:7-alpine
-  flixer-indexer:
-    build: ../flixer-indexer
-    environment:
-      FLIXER_URL: http://flixer:8083
-      APP_SECRET: ${APP_SECRET}
-      REDIS_ADDR: redis:6379
-    volumes:
-      - ${STREAM_MEDIA_ROOT}:/media
-      - indexer-cache:/var/cache/flixer/indexer
-    depends_on: [redis]
-volumes:
-  indexer-cache:
+```mermaid
+flowchart LR
+    A[scan:library] --> B[identify:item]
+    B --> C[metadata:fetch]
+    C --> D[images:fetch]
+    D --> E[probe:item]
+    E --> F[Flixer API upsert]
+    E --> G[trickplay:item]
 ```
 
-## Auth
+`refresh:item` reprocesses an individual path. Worker stages use Redis/Asynq queues. Local NFO and artwork are preferred to provider results; generated caches can be stored under `CACHE_PATH`.
 
-Requests in both directions carry `X-Indexer-Timestamp` and `X-Indexer-Signature` = hex HMAC-SHA256 of
-`flixer-indexer:v1:<ts>:<METHOD>:<path>:<sha256(body)>` with `APP_SECRET` (±5 min skew). `/health` is open.
+## ⚙️ Configuration
 
-## flixer contract (to be implemented in flixer)
-
-- `GET /api/indexer/libraries` → `{libraries:[...]}`
-- `GET /api/indexer/settings` → `{providers, concurrency, language}`
-- `POST /api/indexer/media/items` → `{id}` (4xx other than 429 is treated as permanent)
-
-Hierarchy and identity: every item has `externalKey` (e.g. `tmdb:100:s1:e2`, or `path:<path>` if unidentified) and `parentExternalKey` (series → season → episode). Upsert by `externalKey`, link parents through it (creating a placeholder parent if it hasn't arrived yet), and fall back to `parentProviderIds` / `parentPath` to match a series identified under a different provider. A renamed folder then keeps the same row.
-
-A trickplay-only backfill can be queued with `POST /internal/scan` and `{"libraryId":"…","trickplayOnly":true}`. It scans video items without changing scan progress or pruning; already-current source files are skipped by the worker.
-
-## Internal API
-
-| Endpoint | Purpose |
+| Variable | Purpose / default |
 | --- | --- |
-| `POST /internal/scan`, `POST /internal/refresh` | start a library scan / refresh a path |
-| `GET /internal/scans`, `GET /internal/stats` | progress and stats |
-| `GET /internal/tasks?queue=&state=&page=&size=` | list tasks |
-| `POST /internal/tasks/{queue}/{id}/cancel`, `/retry` | task control |
-| `POST /internal/queues/{queue}/pause`, `/resume` | queue control |
-| `GET`/`POST /internal/concurrency` | worker counts |
-| `POST /internal/settings/reload` | re-fetch settings from flixer |
+| `PORT` | HTTP API; `8092`. |
+| `ROLE` | `all`, `api` or `worker`; default `all`. |
+| `FLIXER_URL` | Backend URL; default `http://localhost:8083`. |
+| `APP_SECRET` | Shared HMAC signing secret. |
+| `REDIS_ADDR` | Queue Redis; default `localhost:6379`. |
+| `CACHE_PATH` | Cache root; default `./cache`. |
+| `TRICKPLAY_ENABLED` | Thumbnail jobs; default `true`. |
+| `WATCH_FOLDERS` | Folder watching; default `true`. |
+
+Provider credentials are fallback values; settings fetched from Flixer take precedence. See [`.env.example`](.env.example) and [`flixer-indexer-SPEC.md`](flixer-indexer-SPEC.md).
+
+## 🔌 Internal API
+
+| Route | Function |
+| --- | --- |
+| `POST /internal/scan`, `/internal/refresh` | Queue scans or refreshes. |
+| `GET /internal/scans`, `/internal/stats` | Observe progress and metrics. |
+| `GET /internal/tasks` | Inspect queued work. |
+| `POST /internal/queues/{queue}/pause`, `/resume` | Pause and resume work. |
+| `GET, POST /internal/concurrency` | Manage worker counts. |
+| `POST /internal/settings/reload` | Refresh settings from Flixer. |
+
+Internal calls use timestamped HMAC signatures. Keep these endpoints off public networks.
+
+## 🧩 Flixer ecosystem
+
+| Repository | Purpose |
+| --- | --- |
+| [Flixer](https://github.com/flixermedia/flixer) | The self-hosted backend API, authentication, libraries, and administration service. |
+| [Flixer Web](https://github.com/flixermedia/flixer-web) | The Vue 3 application that powers browsing, sign-in, discovery, and playback interfaces. |
+| [Flixer Streamer](https://github.com/flixermedia/flixer-streamer) | The Go service responsible for authorised media delivery and FFmpeg processing. |
+| [Flixer Indexer](https://github.com/flixermedia/flixer-indexer) | The Go worker and API service for discovering, identifying, probing, and enriching media. |
+| [Flixer Updater](https://github.com/flixermedia/flixer-updater) | The Go sidecar that orchestrates Docker Compose updates and restores. |
+| [Flixer Plugins](https://github.com/flixermedia/flixer-plugins) | The official versioned catalogue of Flixer plugins and plugin schemas. |
+| [Flixer Docs](https://github.com/flixermedia/flixer-docs) | The Docusaurus source for Flixer platform documentation. |
+
+## 🤝 Contributing
+
+Contributions, bug reports and documentation improvements are welcome. Open an [issue](https://github.com/flixermedia/flixer-indexer/issues) with reproduction steps or a focused proposal, then submit a pull request against the repository. Keep configuration, examples and documentation aligned with implemented code. For backend contributions, also see the [main contribution guidelines](https://github.com/flixermedia/flixer/blob/main/CONTRIBUTING.md).
+
+## 📄 Licence
+
+Check this repository's [`LICENSE`](LICENSE) file, if present, for the authoritative licensing terms. The [main Flixer backend](https://github.com/flixermedia/flixer/blob/main/LICENSE) uses MIT; licensing for separate components should be verified individually before redistribution.
+
+---
+
+<div align="center">
+
+**Your media. Your server. Your rules.**
+
+Made for the [Flixer](https://github.com/flixermedia) ecosystem.
+
+</div>
