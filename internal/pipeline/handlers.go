@@ -36,30 +36,49 @@ func (p *Pipeline) handleScan(ctx context.Context, t *asynq.Task) error {
 	if err != nil {
 		return err
 	}
-	if req.TrickplayOnly {
-		return p.handleTrickplayScan(ctx, lib)
+	if err := validateScanJobs(req.Jobs); err != nil {
+		return fmt.Errorf("%w: %w", err, asynq.SkipRetry)
 	}
-	if err := p.Progress.Start(ctx, lib.ID); err != nil {
-		return err
+	if len(req.Jobs) > 0 && req.TrickplayOnly {
+		return fmt.Errorf("trickplay-only cannot be combined with scan jobs: %w", asynq.SkipRetry)
+	}
+	tracked := req.TrackProgress || (len(req.Jobs) == 0 && !req.TrickplayOnly)
+	if tracked {
+		if err := p.Progress.Start(ctx, lib.ID); err != nil {
+			return err
+		}
+	}
+	if req.TrickplayOnly {
+		return p.handleTrickplayScan(ctx, lib, req.TrackProgress)
 	}
 	p.logger(ctx).Info("scan started", "library", lib.ID, "name", lib.Name, "type", lib.Type)
 
 	err = scanner.Scan(ctx, lib, func(w models.Work) error {
 		w.Force = req.Force
+		w.Jobs = req.Jobs
+		w.Untracked = len(req.Jobs) > 0 && !req.TrackProgress
 		queued, err := p.Enqueue(ctx, config.QueueIdentify, TypeIdentify, w, maxRetry)
 		if err != nil {
 			return err
 		}
-		if queued {
+		if queued && tracked {
 			return p.Progress.Discovered(ctx, lib.ID)
 		}
 		return nil
 	})
 	if err != nil {
-		_ = p.Progress.WalkFailed(context.WithoutCancel(ctx), lib.ID, err)
+		if tracked {
+			_ = p.Progress.WalkFailed(context.WithoutCancel(ctx), lib.ID, err)
+		}
 		return fmt.Errorf("scan %s: %w: %w", lib.ID, err, asynq.SkipRetry)
 	}
 	p.logger(ctx).Info("scan walk finished", "library", lib.ID)
+	if len(req.Jobs) > 0 {
+		if req.TrackProgress {
+			return p.Progress.WalkDone(ctx, lib.ID)
+		}
+		return nil
+	}
 	if err := p.Progress.WalkDone(ctx, lib.ID); err != nil {
 		return err
 	}
@@ -68,21 +87,80 @@ func (p *Pipeline) handleScan(ctx context.Context, t *asynq.Task) error {
 	return nil
 }
 
+var supportedScanJobs = map[string]bool{
+	"images": true, "descriptions": true, "fileData": true, "lyrics": true,
+}
+
+func validateScanJobs(jobs []string) error {
+	seen := make(map[string]bool, len(jobs))
+	for _, job := range jobs {
+		if !supportedScanJobs[job] {
+			return fmt.Errorf("unsupported scan job %q", job)
+		}
+		if seen[job] {
+			return fmt.Errorf("duplicate scan job %q", job)
+		}
+		seen[job] = true
+	}
+	return nil
+}
+
+func hasJob(w models.Work, jobs ...string) bool {
+	for _, selected := range w.Jobs {
+		for _, job := range jobs {
+			if selected == job {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // handleRefresh re-describes a single path and runs it through the pipeline.
-func (p *Pipeline) handleTrickplayScan(ctx context.Context, lib models.Library) error {
+func (p *Pipeline) handleTrickplayScan(ctx context.Context, lib models.Library, trackProgress bool) error {
 	p.logger(ctx).Info("trickplay backfill started", "library", lib.ID, "name", lib.Name)
-	return scanner.Scan(ctx, lib, func(w models.Work) error {
+	err := scanner.Scan(ctx, lib, func(w models.Work) error {
 		item := w.Item
 		if (item.Type != models.ItemMovie && item.Type != models.ItemEpisode && item.Type != models.ItemVideo) || item.RootID == "" || item.RelativePath == "" {
 			return nil
 		}
-		task := trickplay.Task{LibraryID: item.LibraryID, Path: item.Path, RootID: item.RootID, RelativePath: item.RelativePath}
-		_, err := p.Enqueue(ctx, config.QueueTrickplay, TypeTrickplay, task, 1)
+		task := trickplay.Task{
+			LibraryID: item.LibraryID, Path: item.Path, RootID: item.RootID,
+			RelativePath: item.RelativePath, TrackProgress: trackProgress,
+		}
+		if p.Trickplay == nil {
+			return errors.New("trickplay generator is unavailable")
+		}
+		needsGeneration, err := p.Trickplay.NeedsGeneration(task)
+		if err != nil {
+			return fmt.Errorf("check trickplay for %s: %w", item.Path, err)
+		}
+		if !needsGeneration {
+			return nil
+		}
+		queued, err := p.Enqueue(ctx, config.QueueTrickplay, TypeTrickplay, task, 1)
 		if err != nil {
 			p.logger(ctx).Warn("could not queue trickplay during backfill", "library", lib.ID, "error", err)
+			if trackProgress {
+				return err
+			}
+			return nil
+		}
+		if queued && trackProgress {
+			return p.Progress.Discovered(ctx, lib.ID)
 		}
 		return nil
 	})
+	if err != nil {
+		if trackProgress {
+			_ = p.Progress.WalkFailed(context.WithoutCancel(ctx), lib.ID, err)
+		}
+		return err
+	}
+	if trackProgress {
+		return p.Progress.WalkDone(ctx, lib.ID)
+	}
+	return nil
 }
 
 func (p *Pipeline) handleTrickplay(ctx context.Context, t *asynq.Task) error {
@@ -101,6 +179,9 @@ func (p *Pipeline) handleTrickplay(ctx context.Context, t *asynq.Task) error {
 		p.logger(ctx).Warn("trickplay generation failed", "library", task.LibraryID, "error", err)
 		return err
 	}
+	if task.TrackProgress {
+		return p.Progress.Done(ctx, task.LibraryID)
+	}
 	return nil
 }
 
@@ -117,7 +198,15 @@ func (p *Pipeline) handleRefresh(ctx context.Context, t *asynq.Task) error {
 	case models.ItemSeries, models.ItemSeason, models.ItemAlbum:
 		// A container refresh re-indexes every item beneath it.
 		err := scanner.ScanBranch(ctx, lib, req.Path, func(w models.Work) error {
-			w.Force, w.Untracked = true, true
+			w.Force, w.Untracked, w.Priority = true, true, req.Priority
+			if w.Item.Type == req.ItemType && filepath.Clean(w.Item.Path) == filepath.Clean(req.Path) {
+				w.Item.ProviderIDs = providers.MergeIDs(req.ProviderIDs, w.Item.ProviderIDs)
+			}
+			if req.ItemType == models.ItemSeries {
+				w.Hints.SeriesIDs = providers.MergeIDs(req.ProviderIDs, w.Hints.SeriesIDs)
+			} else {
+				w.Hints.SeriesIDs = providers.MergeIDs(req.SeriesProviderIDs, w.Hints.SeriesIDs)
+			}
 			_, err := p.Enqueue(ctx, config.QueueIdentify, TypeIdentify, w, maxRetry)
 			return err
 		})
@@ -130,7 +219,9 @@ func (p *Pipeline) handleRefresh(ctx context.Context, t *asynq.Task) error {
 	if err != nil {
 		return fmt.Errorf("%w: %w", err, asynq.SkipRetry)
 	}
-	w.Force, w.Untracked = true, true
+	w.Force, w.Untracked, w.Priority = true, true, req.Priority
+	w.Item.ProviderIDs = providers.MergeIDs(req.ProviderIDs, w.Item.ProviderIDs)
+	w.Hints.SeriesIDs = providers.MergeIDs(req.SeriesProviderIDs, w.Hints.SeriesIDs)
 	_, err = p.Enqueue(ctx, config.QueueIdentify, TypeIdentify, w, maxRetry)
 	return err
 }
@@ -189,31 +280,35 @@ func (p *Pipeline) handleIdentify(ctx context.Context, t *asynq.Task) error {
 	root := p.folderRoot(lib, w.Item.Path)
 	item := &w.Item
 
-	if path := nfoPath(*item, root); path != "" {
-		data, err := nfo.Read(path)
-		if err != nil {
-			p.logger(ctx).Warn("unreadable nfo", "path", path, "error", err)
-		} else {
-			item.NFOPresent = true
-			item.Metadata = data.Metadata
-			item.ProviderIDs = providers.MergeIDs(item.ProviderIDs, data.IDs)
-			w.NFOComplete = data.Complete()
+	if len(w.Jobs) == 0 || hasJob(w, "images", "descriptions", "lyrics") {
+		if path := nfoPath(*item, root); path != "" {
+			data, err := nfo.Read(path)
+			if err != nil {
+				p.logger(ctx).Warn("unreadable nfo", "path", path, "error", err)
+			} else {
+				item.NFOPresent = true
+				item.Metadata = data.Metadata
+				item.ProviderIDs = providers.MergeIDs(item.ProviderIDs, data.IDs)
+				w.NFOComplete = data.Complete()
+			}
 		}
-	}
-	if item.Type == models.ItemSeason || item.Type == models.ItemEpisode {
-		if path := filepath.Join(w.Hints.SeriesPath, "tvshow.nfo"); w.Hints.SeriesPath != "" {
-			if data, err := nfo.Read(path); err == nil {
-				w.Hints.SeriesIDs = providers.MergeIDs(w.Hints.SeriesIDs, data.IDs)
+		if item.Type == models.ItemSeason || item.Type == models.ItemEpisode {
+			if path := filepath.Join(w.Hints.SeriesPath, "tvshow.nfo"); w.Hints.SeriesPath != "" {
+				if data, err := nfo.Read(path); err == nil {
+					w.Hints.SeriesIDs = providers.MergeIDs(w.Hints.SeriesIDs, data.IDs)
+				}
+			}
+		}
+
+		if hasJob(w, "images") || len(w.Jobs) == 0 {
+			if local := images.FindLocal(*item, root); len(local) > 0 {
+				item.Images = local
+				item.LocalImagesUsed = true
 			}
 		}
 	}
 
-	if local := images.FindLocal(*item, root); len(local) > 0 {
-		item.Images = local
-		item.LocalImagesUsed = true
-	}
-
-	if item.Type == models.ItemTrack {
+	if item.Type == models.ItemTrack && (len(w.Jobs) == 0 || hasJob(w, "descriptions", "lyrics", "fileData")) {
 		res, err := p.Probe.Probe(ctx, item.Path)
 		if err != nil {
 			p.logger(ctx).Warn("track probe failed", "path", item.Path, "error", err)
@@ -223,6 +318,10 @@ func (p *Pipeline) handleIdentify(ctx context.Context, t *asynq.Task) error {
 		}
 	}
 
+	if len(w.Jobs) > 0 && !hasJob(w, "images", "descriptions") {
+		_, err = p.Enqueue(ctx, config.QueueProbe, TypeProbe, w, maxRetry)
+		return err
+	}
 	_, err = p.Enqueue(ctx, config.QueueMetadata, TypeMetadata, w, maxRetry)
 	return err
 }
@@ -295,19 +394,29 @@ func (p *Pipeline) handleMetadata(ctx context.Context, t *asynq.Task) error {
 		return err
 	}
 	// A complete NFO skips metadata lookups, but episodes still need a provider still when no local thumb exists.
-	if !(w.NFOComplete && !w.Force) || needsProviderArtwork(w.Item) {
-		lib, err := p.Library(ctx, w.Item.LibraryID)
-		if err != nil {
-			return err
-		}
-		if reg := p.providers(lib); reg != nil {
-			if err := p.lookup(ctx, reg, &w); err != nil {
+	if len(w.Jobs) == 0 || hasJob(w, "images", "descriptions") {
+		if !(w.NFOComplete && !w.Force) || hasProviderLookupNeed(w) {
+			lib, err := p.Library(ctx, w.Item.LibraryID)
+			if err != nil {
 				return err
+			}
+			if reg := p.providers(lib); reg != nil {
+				if err := p.lookup(ctx, reg, &w); err != nil {
+					return err
+				}
 			}
 		}
 	}
+	if len(w.Jobs) > 0 && !hasJob(w, "images") {
+		_, err = p.Enqueue(ctx, config.QueueProbe, TypeProbe, w, maxRetry)
+		return err
+	}
 	_, err = p.Enqueue(ctx, config.QueueImages, TypeImages, w, maxRetry)
 	return err
+}
+
+func hasProviderLookupNeed(w models.Work) bool {
+	return hasJob(w, "images", "descriptions")
 }
 
 func needsProviderArtwork(item models.Item) bool {
@@ -396,6 +505,10 @@ var imageQuota = map[string]int{
 func (p *Pipeline) handleImages(ctx context.Context, t *asynq.Task) error {
 	w, err := decodeWork(t)
 	if err != nil {
+		return err
+	}
+	if len(w.Jobs) > 0 && !hasJob(w, "images") {
+		_, err = p.Enqueue(ctx, config.QueueProbe, TypeProbe, w, maxRetry)
 		return err
 	}
 	lib, err := p.Library(ctx, w.Item.LibraryID)
@@ -488,28 +601,32 @@ func (p *Pipeline) handleProbe(ctx context.Context, t *asynq.Task) error {
 	}
 	item := &w.Item
 
-	switch item.Type {
-	case models.ItemMovie, models.ItemEpisode, models.ItemVideo, models.ItemTrack:
-		if item.Technical == nil {
-			res, err := p.Probe.Probe(ctx, item.Path)
-			switch {
-			case err == nil:
-				item.Technical = &res.Technical
-			case ctx.Err() != nil:
-				return ctx.Err()
-			default:
-				retried, _ := asynq.GetRetryCount(ctx)
-				if retried < maxRetry {
-					return err
+	if len(w.Jobs) == 0 || hasJob(w, "fileData", "lyrics") {
+		switch item.Type {
+		case models.ItemMovie, models.ItemEpisode, models.ItemVideo, models.ItemTrack:
+			if item.Technical == nil {
+				res, err := p.Probe.Probe(ctx, item.Path)
+				switch {
+				case err == nil:
+					item.Technical = &res.Technical
+				case ctx.Err() != nil:
+					return ctx.Err()
+				default:
+					retried, _ := asynq.GetRetryCount(ctx)
+					if retried < maxRetry {
+						return err
+					}
+					p.logger(ctx).Warn("probe failed; indexing without technical details", "path", item.Path, "error", err)
 				}
-				p.logger(ctx).Warn("probe failed; indexing without technical details", "path", item.Path, "error", err)
 			}
 		}
 	}
 
-	switch item.Type {
-	case models.ItemMovie, models.ItemEpisode, models.ItemVideo:
-		p.ensureSubtitles(ctx, item, w.Hints)
+	if len(w.Jobs) == 0 {
+		switch item.Type {
+		case models.ItemMovie, models.ItemEpisode, models.ItemVideo:
+			p.ensureSubtitles(ctx, item, w.Hints)
+		}
 	}
 
 	lib, err := p.Library(ctx, item.LibraryID)
@@ -517,12 +634,22 @@ func (p *Pipeline) handleProbe(ctx context.Context, t *asynq.Task) error {
 		return err
 	}
 	finalize(&w, p.folderRoot(lib, item.Path))
+	item.UpdateFields = w.Jobs
 	id, err := p.Client.UpsertItem(ctx, *item)
 	if err != nil {
 		if errors.Is(err, flixerclient.ErrPermanent) {
 			return fmt.Errorf("%w: %w", err, asynq.SkipRetry)
 		}
 		return err
+	}
+	if hasJob(w, "lyrics") && item.Type == models.ItemTrack && id != "" {
+		p.queueLyrics(ctx, item, w.Hints, id)
+	}
+	if len(w.Jobs) > 0 {
+		if !w.Untracked {
+			return p.Progress.Done(ctx, item.LibraryID)
+		}
+		return nil
 	}
 	if item.Type == models.ItemTrack {
 		p.queueLyrics(ctx, item, w.Hints, id)
@@ -534,6 +661,7 @@ func (p *Pipeline) handleProbe(ctx context.Context, t *asynq.Task) error {
 		}
 	}
 	p.queueTheme(ctx, *item)
+	p.queueIntroSync(ctx, *item, id)
 	if !w.Untracked {
 		if err := p.Progress.Done(ctx, item.LibraryID); err != nil {
 			return err

@@ -52,6 +52,16 @@ func (s *Stub) Settings(context.Context) (models.Settings, error) { return s.set
 
 func (s *Stub) PruneLibrary(context.Context, string, string) (int, error) { return 0, nil }
 
+func (s *Stub) IntroSyncCandidates(context.Context, string, string, string, int) ([]models.IntroSyncCandidate, string, error) {
+	return nil, "", nil
+}
+
+func (s *Stub) ExistingIntroSegments(context.Context, string) (models.ExistingIntroSegments, error) {
+	return models.ExistingIntroSegments{}, nil
+}
+
+func (s *Stub) UpsertIntroSegments(context.Context, models.IntroSegmentUpdate) error { return nil }
+
 func (s *Stub) UpsertItem(_ context.Context, item models.Item) (string, error) {
 	line, err := json.Marshal(item)
 	if err != nil {

@@ -62,6 +62,30 @@ type ProviderSetting struct {
 	APIKey  string `json:"apiKey,omitempty"`
 }
 
+// IntroSyncCandidate is one existing media row from Flixer's paged backfill feed.
+type IntroSyncCandidate struct {
+	ID          string            `json:"id"`
+	Type        string            `json:"type"`
+	ProviderIDs map[string]string `json:"providerIds"`
+	DurationMs  int64             `json:"durationMs,omitempty"`
+	Season      *int              `json:"season,omitempty"`
+	Episode     *int              `json:"episode,omitempty"`
+}
+
+// IntroTimeRange is one TheIntroDB timestamp, in milliseconds.
+type IntroTimeRange struct {
+	StartMs int64 `json:"startMs"`
+	EndMs   int64 `json:"endMs"`
+}
+
+// IntroSegmentUpdate replaces the provider-owned timings for one indexed item.
+type IntroSegmentUpdate struct {
+	ItemID   string                    `json:"itemId"`
+	Segments map[string]IntroTimeRange `json:"segments"`
+}
+
+type ExistingIntroSegments map[string]bool
+
 // SubtitleSettings configures OpenSubtitles.
 type SubtitleSettings struct {
 	APIKey    string   `json:"apiKey,omitempty"`
@@ -185,10 +209,11 @@ type Chapter struct {
 
 // Item is what the indexer persists through flixer.
 type Item struct {
-	LibraryID  string `json:"libraryId"`
-	Type       string `json:"type"`
-	Path       string `json:"path"`
-	ParentPath string `json:"parentPath,omitempty"`
+	LibraryID    string   `json:"libraryId"`
+	Type         string   `json:"type"`
+	Path         string   `json:"path"`
+	UpdateFields []string `json:"updateFields,omitempty"`
+	ParentPath   string   `json:"parentPath,omitempty"`
 	// ExternalKey is a rename-proof identity (e.g. "tmdb:1234:s1:e2"), or
 	// "path:<path>" when the item is unidentified. ParentExternalKey names the
 	// parent the same way; ParentProviderIDs lets flixer match a series whose
@@ -225,9 +250,12 @@ type Hints struct {
 
 // Work is the payload carried between pipeline stages for a single item.
 type Work struct {
-	Item  Item  `json:"item"`
-	Hints Hints `json:"hints"`
-	Force bool  `json:"force,omitempty"`
+	Item  Item     `json:"item"`
+	Hints Hints    `json:"hints"`
+	Jobs  []string `json:"jobs,omitempty"`
+	Force bool     `json:"force,omitempty"`
+	// Priority keeps a manual-ID rescan ahead of ordinary work at each stage.
+	Priority bool `json:"priority,omitempty"`
 	// NFOComplete means local metadata is enough to skip remote lookups.
 	NFOComplete bool `json:"nfoComplete,omitempty"`
 	// Untracked work (single-item refreshes) does not count toward scan progress.
@@ -236,14 +264,19 @@ type Work struct {
 
 // ScanRequest starts a scan of a library.
 type ScanRequest struct {
-	LibraryID     string `json:"libraryId"`
-	Force         bool   `json:"force,omitempty"`
-	TrickplayOnly bool   `json:"trickplayOnly,omitempty"`
+	LibraryID     string   `json:"libraryId"`
+	Force         bool     `json:"force,omitempty"`
+	TrickplayOnly bool     `json:"trickplayOnly,omitempty"`
+	TrackProgress bool     `json:"trackProgress,omitempty"`
+	Jobs          []string `json:"jobs,omitempty"`
 }
 
 // RefreshRequest re-runs the pipeline for one item.
 type RefreshRequest struct {
-	LibraryID string `json:"libraryId"`
-	Path      string `json:"path"`
-	ItemType  string `json:"itemType"`
+	LibraryID         string            `json:"libraryId"`
+	Path              string            `json:"path"`
+	ItemType          string            `json:"itemType"`
+	ProviderIDs       map[string]string `json:"providerIds,omitempty"`
+	SeriesProviderIDs map[string]string `json:"seriesProviderIds,omitempty"`
+	Priority          bool              `json:"priority,omitempty"`
 }

@@ -98,6 +98,13 @@ func (r *Reloader) Reload(ctx context.Context) error {
 	reg := registry.Build(s, r.EnvKeys, r.UA, r.Language, extensions...)
 	r.Pipeline.SetRegistry(reg)
 	r.Log.Info("providers loaded", "providers", reg.Names(), "language", reg.Language())
+	introDB, configured := s.Providers["theintrodb"]
+	if client, ok := r.Pipeline.IntroDB.(interface{ SetAPIKey(string) }); ok {
+		client.SetAPIKey(introDB.APIKey)
+	}
+	r.Pipeline.SetTheIntroDBEnabled(!configured || introDB.Enabled)
+	introDBFallback, configured := s.Providers["introdb"]
+	r.Pipeline.SetIntroDBEnabled(!configured || introDBFallback.Enabled)
 
 	subs := r.EnvSubtitles
 	if s.Subtitles != nil && s.Subtitles.APIKey != "" {

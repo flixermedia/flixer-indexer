@@ -2,8 +2,10 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -31,7 +33,13 @@ func NewPool(redis asynq.RedisConnOpt, p *Pipeline, log *slog.Logger) *Pool {
 
 // Start launches a worker server for every queue.
 func (p *Pool) Start(concurrency map[string]int) error {
-	for _, queue := range config.Queues {
+	for _, queue := range config.WorkerQueues {
+		p.mu.Lock()
+		alreadyStarted := p.servers[queue] != nil
+		p.mu.Unlock()
+		if alreadyStarted {
+			continue
+		}
 		if err := p.SetConcurrency(queue, concurrency[queue]); err != nil {
 			return err
 		}
@@ -42,6 +50,9 @@ func (p *Pool) Start(concurrency map[string]int) error {
 // SetConcurrency starts or restarts a queue's server with n workers. Tasks
 // running during a restart are given time to finish, then requeued.
 func (p *Pool) SetConcurrency(queue string, n int) error {
+	if !slices.Contains(config.WorkerQueues, queue) {
+		return fmt.Errorf("unknown queue %q", queue)
+	}
 	handlers, ok := p.pipeline.Handlers()[queue]
 	if !ok {
 		return fmt.Errorf("unknown queue %q", queue)
@@ -60,14 +71,19 @@ func (p *Pool) SetConcurrency(queue string, n int) error {
 		delete(p.servers, queue)
 	}
 
+	queues := map[string]int{queue: 1}
+	if priorityQueue, supported := config.PriorityQueue(queue); supported {
+		queues[priorityQueue] = 10
+	}
 	srv := asynq.NewServer(p.redis, asynq.Config{
 		Concurrency:     n,
-		Queues:          map[string]int{queue: 1},
+		Queues:          queues,
+		StrictPriority:  true,
 		ShutdownTimeout: 30 * time.Second,
 		ErrorHandler:    asynq.ErrorHandlerFunc(p.pipeline.OnError),
 		Logger:          slogAdapter{p.log.With("component", "asynq", "queue", queue)},
 		LogLevel:        asynq.WarnLevel,
-		RetryDelayFunc:  asynq.DefaultRetryDelayFunc,
+		RetryDelayFunc:  retryDelay,
 	})
 	mux := asynq.NewServeMux()
 	for typ, h := range handlers {
@@ -80,6 +96,26 @@ func (p *Pool) SetConcurrency(queue string, n int) error {
 	p.conc[queue] = n
 	p.log.Info("workers running", "queue", queue, "concurrency", n)
 	return nil
+}
+
+type retryDelayError struct {
+	err   error
+	delay time.Duration
+}
+
+func (e *retryDelayError) Error() string { return e.err.Error() }
+func (e *retryDelayError) Unwrap() error { return e.err }
+
+func retryAfter(err error, delay time.Duration) error {
+	return &retryDelayError{err: err, delay: delay}
+}
+
+func retryDelay(n int, err error, task *asynq.Task) time.Duration {
+	var delayed *retryDelayError
+	if errors.As(err, &delayed) {
+		return delayed.delay
+	}
+	return asynq.DefaultRetryDelayFunc(n, err, task)
 }
 
 // Concurrency reports the current worker count per queue.

@@ -148,6 +148,16 @@ func TestScanAndInspect(t *testing.T) {
 	}
 }
 
+func TestIntroSegmentQueueValidatesRequestAndProviderSettings(t *testing.T) {
+	h := newServer(t)
+	if rec := do(h, http.MethodPost, "/internal/intro/queue", map[string]string{"libraryId": "lib1", "type": "series"}, true); rec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid type status = %d: %s", rec.Code, rec.Body)
+	}
+	if rec := do(h, http.MethodPost, "/internal/intro/queue", map[string]string{"libraryId": "lib1", "type": "movie"}, true); rec.Code != http.StatusAccepted {
+		t.Fatalf("valid queue status = %d: %s", rec.Code, rec.Body)
+	}
+}
+
 func TestTaskLogsEndpoint(t *testing.T) {
 	h := newServer(t)
 	if rec := do(h, http.MethodGet, "/internal/tasks/nope/abc/logs", nil, true); rec.Code != http.StatusNotFound {

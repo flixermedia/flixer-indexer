@@ -76,6 +76,7 @@ func (s *Server) Handler() http.Handler {
 	signed.HandleFunc("POST /internal/image", s.image)
 	signed.HandleFunc("POST /internal/theme", s.theme)
 	signed.HandleFunc("POST /internal/themes/queue", s.queueThemes)
+	signed.HandleFunc("POST /internal/intro/queue", s.queueIntroSegments)
 	signed.HandleFunc("POST /internal/people/image", s.personImage)
 	signed.HandleFunc("POST /internal/people/bio", s.personBio)
 	signed.HandleFunc("POST /internal/subtitles/list", s.subtitleList)
@@ -204,6 +205,22 @@ func (s *Server) scan(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "libraryId is required")
 		return
 	}
+	seenJobs := make(map[string]bool, len(req.Jobs))
+	for _, job := range req.Jobs {
+		if job != "images" && job != "descriptions" && job != "fileData" && job != "lyrics" {
+			writeError(w, http.StatusBadRequest, "unsupported scan job")
+			return
+		}
+		if seenJobs[job] {
+			writeError(w, http.StatusBadRequest, "duplicate scan job")
+			return
+		}
+		seenJobs[job] = true
+	}
+	if len(req.Jobs) > 0 && req.TrickplayOnly {
+		writeError(w, http.StatusBadRequest, "trickplayOnly cannot be combined with scan jobs")
+		return
+	}
 	if _, err := s.Pipeline.Library(r.Context(), req.LibraryID); err != nil {
 		writeError(w, http.StatusNotFound, "library not found")
 		return
@@ -271,19 +288,29 @@ type queueStats struct {
 }
 
 func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
-	queues := make([]queueStats, 0, len(config.Queues))
-	for _, q := range config.Queues {
-		info, err := s.Inspector.GetQueueInfo(q)
-		if err != nil {
-			// A queue that has never held a task does not exist in Redis yet.
-			queues = append(queues, queueStats{Queue: q})
-			continue
+	queues := make([]queueStats, 0, len(config.WorkerQueues))
+	for _, q := range config.WorkerQueues {
+		stats := queueStats{Queue: q}
+		for _, physicalQueue := range config.QueueGroup(q) {
+			info, err := s.Inspector.GetQueueInfo(physicalQueue)
+			if err != nil {
+				// A queue that has never held a task does not exist in Redis yet.
+				continue
+			}
+			stats.Pending += info.Pending
+			stats.Active += info.Active
+			stats.Scheduled += info.Scheduled
+			stats.Retry += info.Retry
+			stats.Archived += info.Archived
+			stats.Completed += info.Completed
+			stats.Processed += info.Processed
+			stats.Failed += info.Failed
+			stats.Paused = stats.Paused || info.Paused
+			if info.Latency.Milliseconds() > stats.LatencyMs {
+				stats.LatencyMs = info.Latency.Milliseconds()
+			}
 		}
-		queues = append(queues, queueStats{
-			Queue: q, Pending: info.Pending, Active: info.Active, Scheduled: info.Scheduled, Retry: info.Retry,
-			Archived: info.Archived, Completed: info.Completed, Processed: info.Processed, Failed: info.Failed,
-			Paused: info.Paused, LatencyMs: info.Latency.Milliseconds(),
-		})
+		queues = append(queues, stats)
 	}
 	scans, _ := s.Progress.All(r.Context())
 	if scans == nil {
@@ -513,31 +540,36 @@ func (s *Server) cancelActive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Waiting tasks go first so workers can't pick up new ones while we cancel.
-	waiting, err := s.deleteWaiting(queue)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not clear waiting tasks")
-		return
-	}
-	active, err := s.Inspector.ListActiveTasks(queue, asynq.PageSize(1000))
-	if err != nil && !errors.Is(err, asynq.ErrQueueNotFound) {
-		writeError(w, http.StatusInternalServerError, "could not list running tasks")
-		return
-	}
-	running := 0
-	for _, task := range active {
-		if s.Inspector.CancelProcessing(task.ID) == nil {
-			running++
+	waiting, running := 0, 0
+	for _, physicalQueue := range config.QueueGroup(queue) {
+		n, err := s.deleteWaiting(physicalQueue)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "could not clear waiting tasks")
+			return
+		}
+		waiting += n
+		active, err := s.Inspector.ListActiveTasks(physicalQueue, asynq.PageSize(1000))
+		if err != nil && !errors.Is(err, asynq.ErrQueueNotFound) {
+			writeError(w, http.StatusInternalServerError, "could not list running tasks")
+			return
+		}
+		for _, task := range active {
+			if s.Inspector.CancelProcessing(task.ID) == nil {
+				running++
+			}
 		}
 	}
 	if running > 0 {
 		// A cancelled task is handed back for retry, so sweep again once workers have let go of it.
 		time.Sleep(1500 * time.Millisecond)
-		again, err := s.deleteWaiting(queue)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "could not clear waiting tasks")
-			return
+		for _, physicalQueue := range config.QueueGroup(queue) {
+			again, err := s.deleteWaiting(physicalQueue)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "could not clear waiting tasks")
+				return
+			}
+			waiting += again
 		}
-		waiting += again
 	}
 	pending := waiting
 	writeJSON(w, http.StatusOK, map[string]any{"queue": queue, "cancelled": pending + running, "pending": pending, "running": running})
@@ -550,12 +582,16 @@ func (s *Server) clearFailed(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "unknown queue")
 		return
 	}
-	n, err := s.Inspector.DeleteAllArchivedTasks(queue)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not clear failed tasks")
-		return
+	total := 0
+	for _, physicalQueue := range config.QueueGroup(queue) {
+		n, err := s.Inspector.DeleteAllArchivedTasks(physicalQueue)
+		if err != nil && !errors.Is(err, asynq.ErrQueueNotFound) {
+			writeError(w, http.StatusInternalServerError, "could not clear failed tasks")
+			return
+		}
+		total += n
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"queue": queue, "cleared": n})
+	writeJSON(w, http.StatusOK, map[string]any{"queue": queue, "cleared": total})
 }
 
 func (s *Server) pause(paused bool) http.HandlerFunc {
@@ -565,15 +601,17 @@ func (s *Server) pause(paused bool) http.HandlerFunc {
 			writeError(w, http.StatusNotFound, "unknown queue")
 			return
 		}
-		var err error
-		if paused {
-			err = s.Inspector.PauseQueue(queue)
-		} else {
-			err = s.Inspector.UnpauseQueue(queue)
-		}
-		if err != nil && !errors.Is(err, asynq.ErrQueueNotFound) {
-			writeError(w, http.StatusConflict, err.Error())
-			return
+		for _, physicalQueue := range config.QueueGroup(queue) {
+			var err error
+			if paused {
+				err = s.Inspector.PauseQueue(physicalQueue)
+			} else {
+				err = s.Inspector.UnpauseQueue(physicalQueue)
+			}
+			if err != nil && !errors.Is(err, asynq.ErrQueueNotFound) {
+				writeError(w, http.StatusConflict, err.Error())
+				return
+			}
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"queue": queue, "paused": paused})
 	}
@@ -597,7 +635,7 @@ func (s *Server) setConcurrency(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for q, n := range req {
-		if !slices.Contains(config.Queues, q) {
+		if !slices.Contains(config.WorkerQueues, q) {
 			writeError(w, http.StatusBadRequest, "unknown queue "+q)
 			return
 		}

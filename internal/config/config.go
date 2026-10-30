@@ -14,19 +14,52 @@ import (
 
 // Queue names, shared by the pipeline, the pool and the API.
 const (
-	QueueScan      = "scan"
-	QueueIdentify  = "identify"
-	QueueMetadata  = "metadata"
-	QueueImages    = "images"
-	QueueProbe     = "probe"
-	QueueRefresh   = "refresh"
-	QueueTrickplay = "trickplay"
-	QueueThemes    = "themes"
-	QueueLyrics    = "lyrics"
+	QueueScan          = "scan"
+	QueueIdentify      = "identify"
+	QueueMetadata      = "metadata"
+	QueueImages        = "images"
+	QueueProbe         = "probe"
+	QueueRefresh       = "refresh"
+	QueueTrickplay     = "trickplay"
+	QueueThemes        = "themes"
+	QueueLyrics        = "lyrics"
+	QueueIntroMovies   = "intro-movies"
+	QueueIntroEpisodes = "intro-episodes"
 )
 
-// Queues lists every queue in pipeline order.
-var Queues = []string{QueueScan, QueueIdentify, QueueMetadata, QueueImages, QueueProbe, QueueRefresh, QueueTrickplay, QueueThemes, QueueLyrics}
+const PriorityQueueSuffix = "-priority"
+
+// WorkerQueues lists queues with independently configurable worker counts.
+var WorkerQueues = []string{QueueScan, QueueIdentify, QueueMetadata, QueueImages, QueueProbe, QueueRefresh, QueueTrickplay, QueueThemes, QueueLyrics, QueueIntroMovies, QueueIntroEpisodes}
+
+// PriorityQueues have matching workers that prefer these queues over normal
+// work at the same pipeline stage.
+var PriorityQueues = []string{QueueIdentify + PriorityQueueSuffix, QueueMetadata + PriorityQueueSuffix, QueueImages + PriorityQueueSuffix, QueueProbe + PriorityQueueSuffix, QueueRefresh + PriorityQueueSuffix}
+
+// Queues lists every physical queue, including queues used for priority rescans.
+var Queues = append(append([]string{}, WorkerQueues...), PriorityQueues...)
+
+// PriorityQueue returns the priority counterpart of a pipeline stage queue.
+func PriorityQueue(queue string) (string, bool) {
+	for _, priorityQueue := range PriorityQueues {
+		base := strings.TrimSuffix(priorityQueue, PriorityQueueSuffix)
+		if base == queue {
+			return priorityQueue, true
+		}
+	}
+	return "", false
+}
+
+// QueueGroup returns a stage's normal and priority queues, or one exact queue.
+func QueueGroup(queue string) []string {
+	if priorityQueue, ok := PriorityQueue(queue); ok {
+		return []string{queue, priorityQueue}
+	}
+	if strings.HasSuffix(queue, PriorityQueueSuffix) {
+		return []string{queue}
+	}
+	return []string{queue}
+}
 
 // MaxConcurrency caps what an admin can set for a single queue.
 const MaxConcurrency = 64
@@ -154,10 +187,11 @@ func Load() (Config, error) {
 	defaults := map[string]int{
 		QueueScan: 2, QueueIdentify: 12, QueueMetadata: 12,
 		QueueImages: 8, QueueProbe: 12, QueueRefresh: 4, QueueTrickplay: 6, QueueThemes: 6, QueueLyrics: 2,
+		QueueIntroMovies: 2, QueueIntroEpisodes: 4,
 	}
 	concurrency := make(map[string]int, len(defaults))
 	for queue, fallback := range defaults {
-		key := "CONCURRENCY_" + strings.ToUpper(queue)
+		key := "CONCURRENCY_" + strings.NewReplacer("-", "_").Replace(strings.ToUpper(queue))
 		n, err := strconv.Atoi(envOrDefault(key, strconv.Itoa(fallback)))
 		if err != nil || n < 1 || n > MaxConcurrency {
 			return Config{}, fmt.Errorf("%s must be an integer from 1 to %d", key, MaxConcurrency)

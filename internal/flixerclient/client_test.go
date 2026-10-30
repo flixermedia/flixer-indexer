@@ -1,7 +1,9 @@
 package flixerclient
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -23,6 +25,7 @@ func serve(t *testing.T, handler http.HandlerFunc) *Client {
 			http.Error(w, "bad signature", http.StatusUnauthorized)
 			return
 		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
 		handler(w, r)
 	}))
 	t.Cleanup(srv.Close)
@@ -55,6 +58,49 @@ func TestUpsertItem(t *testing.T) {
 	id, err := c.UpsertItem(context.Background(), models.Item{Type: models.ItemMovie, Path: "/x.mkv"})
 	if err != nil || id != "item-1" {
 		t.Errorf("id = %q, %v", id, err)
+	}
+}
+
+func TestIntroSyncContract(t *testing.T) {
+	c := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case introSyncPath:
+			if r.URL.Query().Get("type") != "episode" || r.URL.Query().Get("libraryId") != "library" || r.URL.Query().Get("afterId") != "cursor" || r.URL.Query().Get("limit") != "25" {
+				t.Errorf("query = %s", r.URL.RawQuery)
+			}
+			_, _ = w.Write([]byte(`{"items":[{"id":"item","type":"episode","providerIds":{"tvdb":"123"},"season":1,"episode":2}],"nextCursor":"next"}`))
+		case introSavePath:
+			if r.Method == http.MethodGet {
+				if r.URL.Query().Get("itemId") != "item" {
+					t.Errorf("query = %s", r.URL.RawQuery)
+				}
+				_, _ = w.Write([]byte(`{"segments":{"intro":true,"credits":true}}`))
+				return
+			}
+			var update models.IntroSegmentUpdate
+			if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
+				t.Fatal(err)
+			}
+			if update.ItemID != "item" || update.Segments["intro"].StartMs != 10 {
+				t.Errorf("update = %+v", update)
+			}
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+	})
+	items, cursor, err := c.IntroSyncCandidates(context.Background(), "episode", "library", "cursor", 25)
+	if err != nil || cursor != "next" || len(items) != 1 || items[0].Episode == nil || *items[0].Episode != 2 {
+		t.Fatalf("candidates = %+v cursor=%q err=%v", items, cursor, err)
+	}
+	existing, err := c.ExistingIntroSegments(context.Background(), "item")
+	if err != nil || !existing["intro"] || !existing["credits"] {
+		t.Fatalf("existing segments = %+v, err=%v", existing, err)
+	}
+	if err := c.UpsertIntroSegments(context.Background(), models.IntroSegmentUpdate{
+		ItemID: "item", Segments: map[string]models.IntroTimeRange{"intro": {StartMs: 10, EndMs: 20}},
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 

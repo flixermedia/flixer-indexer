@@ -134,6 +134,7 @@ func run() error {
 	tracker := progress.New(rdb)
 	store := images.NewStore(cfg.CachePath, cfg.FFmpegPath, cfg.UserAgent)
 	pipe := pipeline.New(client, store, probe.New(cfg.FFprobePath), tracker, queue, log)
+	pipe.TaskLocks = rdb
 	pipe.SubtitleDir = cfg.SubtitleDir
 	pipe.TaskLogs = tasklog.New(rdb)
 	pipe.Themes = themes.NewFetcher(cfg.CachePath, cfg.FFmpegPath, cfg.UserAgent)
@@ -168,6 +169,7 @@ func run() error {
 			return err
 		}
 		defer pool.Shutdown(context.Background())
+		monitoring.Go(func() { pipe.RunIntroBackfill(ctx, 12*time.Hour) })
 	}
 	monitoring.Go(func() { reloader.Run(ctx) })
 	if cfg.WatchFolders && cfg.Role != config.RoleWorker {

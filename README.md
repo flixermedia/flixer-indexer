@@ -61,9 +61,11 @@ flowchart LR
     D --> E[probe:item]
     E --> F[Flixer API upsert]
     E --> G[trickplay:item]
+    F --> H[intro:movie]
+    F --> I[intro:episode]
 ```
 
-`refresh:item` reprocesses an individual path. Worker stages use Redis/Asynq queues. Local NFO and artwork are preferred to provider results; generated caches can be stored under `CACHE_PATH`.
+`refresh:item` reprocesses an individual path. Worker stages use Redis/Asynq queues. Movie and episode timing syncs run on separate queues. The indexer tries TheIntroDB v4 first, then IntroDB (`api.introdb.app`) when timings are missing or the first request fails; IntroDB uses public reads and requires an IMDb ID. An optional TheIntroDB API key can be configured in Flixer's admin settings. Startup backfills existing indexed media, and future item upserts enqueue updates. Local NFO and artwork are preferred to provider results; generated caches can be stored under `CACHE_PATH`.
 
 ## ⚙️ Configuration
 
@@ -77,6 +79,8 @@ flowchart LR
 | `CACHE_PATH` | Cache root; default `./cache`. |
 | `TRICKPLAY_ENABLED` | Thumbnail jobs; default `true`. |
 | `WATCH_FOLDERS` | Folder watching; default `true`. |
+| `CONCURRENCY_INTRO_MOVIES` | Movie timing-sync workers; default `2`. |
+| `CONCURRENCY_INTRO_EPISODES` | Episode timing-sync workers; default `4`. |
 
 Provider credentials are fallback values; settings fetched from Flixer take precedence. See [`.env.example`](.env.example) and [`flixer-indexer-SPEC.md`](flixer-indexer-SPEC.md).
 

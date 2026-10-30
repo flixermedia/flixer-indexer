@@ -40,10 +40,11 @@ type Generator struct {
 }
 
 type Task struct {
-	LibraryID    string `json:"libraryId"`
-	Path         string `json:"path"`
-	RootID       string `json:"rootId"`
-	RelativePath string `json:"relativePath"`
+	LibraryID     string `json:"libraryId"`
+	Path          string `json:"path"`
+	RootID        string `json:"rootId"`
+	RelativePath  string `json:"relativePath"`
+	TrackProgress bool   `json:"trackProgress,omitempty"`
 }
 
 type Index struct {
@@ -59,9 +60,43 @@ type Index struct {
 	SourceModifiedAt string `json:"sourceModifiedAt"`
 }
 
+func (g *Generator) NeedsGeneration(task Task) (bool, error) {
+	if task.RootID == "" || task.RelativePath == "" || task.Path == "" {
+		return false, errors.New("invalid trickplay task")
+	}
+	info, err := os.Stat(task.Path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("inspect source: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return false, nil
+	}
+	current, err := g.hasCurrentIndex(task, info)
+	return !current, err
+}
+
 func Key(rootID, relativePath string) string {
 	key, _ := mediaid.Key(rootID, relativePath)
 	return key
+}
+
+func (g *Generator) hasCurrentIndex(task Task, info os.FileInfo) (bool, error) {
+	current, err := os.ReadFile(filepath.Join(g.Directory, Key(task.RootID, task.RelativePath), "index.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read trickplay index: %w", err)
+	}
+	var index Index
+	if json.Unmarshal(current, &index) != nil {
+		return false, nil
+	}
+	modified := info.ModTime().UTC().Format(time.RFC3339)
+	return index.SourceSize == info.Size() && index.SourceModifiedAt == modified, nil
 }
 
 func (g *Generator) Generate(ctx context.Context, task Task) error {
@@ -81,11 +116,12 @@ func (g *Generator) Generate(ctx context.Context, task Task) error {
 	modified := info.ModTime().UTC().Format(time.RFC3339)
 	key := Key(task.RootID, task.RelativePath)
 	destination := filepath.Join(g.Directory, key)
-	if current, err := os.ReadFile(filepath.Join(destination, "index.json")); err == nil {
-		var index Index
-		if json.Unmarshal(current, &index) == nil && index.SourceSize == info.Size() && index.SourceModifiedAt == modified {
-			return nil
-		}
+	current, err := g.hasCurrentIndex(task, info)
+	if err != nil {
+		return fmt.Errorf("inspect existing trickplay index: %w", err)
+	}
+	if current {
+		return nil
 	}
 
 	var duration float64

@@ -43,7 +43,7 @@ func key(libraryID string) string { return "indexer:scan:" + libraryID }
 func (t *Tracker) Start(ctx context.Context, libraryID string) error {
 	pipe := t.rdb.TxPipeline()
 	pipe.Del(ctx, key(libraryID))
-	pipe.HSet(ctx, key(libraryID), "state", StateScanning, "startedAt", time.Now().UTC().Format(time.RFC3339),
+	pipe.HSet(ctx, key(libraryID), "state", StateScanning, "startedAt", time.Now().UTC().Format(time.RFC3339Nano),
 		"discovered", 0, "done", 0, "failed", 0)
 	pipe.Expire(ctx, key(libraryID), ttl)
 	_, err := pipe.Exec(ctx)

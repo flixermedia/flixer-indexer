@@ -24,6 +24,8 @@ const (
 	librariesPath = "/api/indexer/libraries"
 	settingsPath  = "/api/indexer/settings"
 	itemsPath     = "/api/indexer/media/items"
+	introSyncPath = "/api/indexer/media/intro-sync"
+	introSavePath = "/api/indexer/media/intro-segments"
 )
 
 // API is everything the indexer needs from flixer.
@@ -32,6 +34,12 @@ type API interface {
 	Settings(ctx context.Context) (models.Settings, error)
 	// UpsertItem creates or updates an item and returns flixer's id for it.
 	UpsertItem(ctx context.Context, item models.Item) (string, error)
+	// IntroSyncCandidates pages through indexed movies or episodes for a backfill.
+	IntroSyncCandidates(ctx context.Context, itemType, libraryID, afterID string, limit int) ([]models.IntroSyncCandidate, string, error)
+	// ExistingIntroSegments reports stored intro and credits timings for an item.
+	ExistingIntroSegments(ctx context.Context, itemID string) (models.ExistingIntroSegments, error)
+	// UpsertIntroSegments replaces TheIntroDB's stored timings for an item.
+	UpsertIntroSegments(ctx context.Context, update models.IntroSegmentUpdate) error
 	// PruneLibrary deletes the library's items not seen since the given scan
 	// start (RFC 3339) and returns how many were removed.
 	PruneLibrary(ctx context.Context, libraryID, scanStartedAt string) (int, error)
@@ -121,6 +129,41 @@ func (c *Client) UpsertItem(ctx context.Context, item models.Item) (string, erro
 		return "", err
 	}
 	return body.ID, nil
+}
+
+func (c *Client) IntroSyncCandidates(ctx context.Context, itemType, libraryID, afterID string, limit int) ([]models.IntroSyncCandidate, string, error) {
+	query := url.Values{}
+	query.Set("type", itemType)
+	query.Set("limit", fmt.Sprint(limit))
+	if libraryID != "" {
+		query.Set("libraryId", libraryID)
+	}
+	if afterID != "" {
+		query.Set("afterId", afterID)
+	}
+	var body struct {
+		Items      []models.IntroSyncCandidate `json:"items"`
+		NextCursor string                      `json:"nextCursor"`
+	}
+	if err := c.do(ctx, http.MethodGet, introSyncPath+"?"+query.Encode(), nil, &body); err != nil {
+		return nil, "", err
+	}
+	return body.Items, body.NextCursor, nil
+}
+
+func (c *Client) ExistingIntroSegments(ctx context.Context, itemID string) (models.ExistingIntroSegments, error) {
+	path := introSavePath + "?itemId=" + url.QueryEscape(itemID)
+	var body struct {
+		Segments models.ExistingIntroSegments `json:"segments"`
+	}
+	if err := c.do(ctx, http.MethodGet, path, nil, &body); err != nil {
+		return nil, err
+	}
+	return body.Segments, nil
+}
+
+func (c *Client) UpsertIntroSegments(ctx context.Context, update models.IntroSegmentUpdate) error {
+	return c.do(ctx, http.MethodPost, introSavePath, update, nil)
 }
 
 func (c *Client) PruneLibrary(ctx context.Context, libraryID, scanStartedAt string) (int, error) {
