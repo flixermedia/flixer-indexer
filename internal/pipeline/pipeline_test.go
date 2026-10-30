@@ -28,6 +28,7 @@ type fakeAPI struct {
 	got                   []models.Item
 	pruned                []string
 	introUpdates          []models.IntroSegmentUpdate
+	lyricsUpdates         map[string]string
 	existingIntroSegments models.ExistingIntroSegments
 }
 
@@ -52,11 +53,48 @@ func (f *fakeAPI) UpsertIntroSegments(_ context.Context, update models.IntroSegm
 	f.introUpdates = append(f.introUpdates, update)
 	return nil
 }
+func (f *fakeAPI) UpsertItemLyrics(_ context.Context, itemID, text string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.lyricsUpdates == nil {
+		f.lyricsUpdates = make(map[string]string)
+	}
+	f.lyricsUpdates[itemID] = text
+	return nil
+}
 func (f *fakeAPI) UpsertItem(_ context.Context, item models.Item) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.got = append(f.got, item)
 	return "id", nil
+}
+
+func TestHandleLyricsSyncsExistingSidecar(t *testing.T) {
+	root := t.TempDir()
+	audio := filepath.Join(root, "song.flac")
+	if err := os.WriteFile(audio, []byte("audio"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "song.lrc"), []byte("[00:01.00]hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	api := &fakeAPI{}
+	pipeline := &Pipeline{
+		Client:    api,
+		LyricsDir: filepath.Join(root, "cache"),
+		Log:       slog.New(slog.NewTextHandler(os.Stderr, nil)),
+	}
+	payload, err := json.Marshal(lyricsTask{Path: audio, TrackID: "track-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := pipeline.handleLyrics(context.Background(), asynq.NewTask(TypeLyrics, payload)); err != nil {
+		t.Fatal(err)
+	}
+	if got := api.lyricsUpdates["track-1"]; got != "[00:01.00]hello" {
+		t.Fatalf("lyrics update = %q", got)
+	}
 }
 
 type fakeProbe struct{}

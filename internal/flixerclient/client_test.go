@@ -61,6 +61,27 @@ func TestUpsertItem(t *testing.T) {
 	}
 }
 
+func TestUpsertItemLyrics(t *testing.T) {
+	c := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != lyricsPath+"track-1/lyrics" {
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+		}
+		var body struct {
+			Lyrics string `json:"lyrics"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body.Lyrics != "[00:01.00]hello" {
+			t.Errorf("lyrics = %q", body.Lyrics)
+		}
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	})
+	if err := c.UpsertItemLyrics(context.Background(), "track-1", "[00:01.00]hello"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestIntroSyncContract(t *testing.T) {
 	c := serve(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

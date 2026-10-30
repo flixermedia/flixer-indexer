@@ -24,6 +24,7 @@ const (
 	librariesPath = "/api/indexer/libraries"
 	settingsPath  = "/api/indexer/settings"
 	itemsPath     = "/api/indexer/media/items"
+	lyricsPath    = "/api/indexer/media/items/"
 	introSyncPath = "/api/indexer/media/intro-sync"
 	introSavePath = "/api/indexer/media/intro-segments"
 )
@@ -34,6 +35,8 @@ type API interface {
 	Settings(ctx context.Context) (models.Settings, error)
 	// UpsertItem creates or updates an item and returns flixer's id for it.
 	UpsertItem(ctx context.Context, item models.Item) (string, error)
+	// UpsertItemLyrics stores searchable lyrics for an indexed track.
+	UpsertItemLyrics(ctx context.Context, itemID, lyrics string) error
 	// IntroSyncCandidates pages through indexed movies or episodes for a backfill.
 	IntroSyncCandidates(ctx context.Context, itemType, libraryID, afterID string, limit int) ([]models.IntroSyncCandidate, string, error)
 	// ExistingIntroSegments reports stored intro and credits timings for an item.
@@ -129,6 +132,12 @@ func (c *Client) UpsertItem(ctx context.Context, item models.Item) (string, erro
 		return "", err
 	}
 	return body.ID, nil
+}
+
+func (c *Client) UpsertItemLyrics(ctx context.Context, itemID, text string) error {
+	return c.do(ctx, http.MethodPost, lyricsPath+url.PathEscape(itemID)+"/lyrics", struct {
+		Lyrics string `json:"lyrics"`
+	}{Lyrics: text}, nil)
 }
 
 func (c *Client) IntroSyncCandidates(ctx context.Context, itemType, libraryID, afterID string, limit int) ([]models.IntroSyncCandidate, string, error) {

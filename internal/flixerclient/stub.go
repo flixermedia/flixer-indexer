@@ -62,6 +62,8 @@ func (s *Stub) ExistingIntroSegments(context.Context, string) (models.ExistingIn
 
 func (s *Stub) UpsertIntroSegments(context.Context, models.IntroSegmentUpdate) error { return nil }
 
+func (s *Stub) UpsertItemLyrics(context.Context, string, string) error { return nil }
+
 func (s *Stub) UpsertItem(_ context.Context, item models.Item) (string, error) {
 	line, err := json.Marshal(item)
 	if err != nil {
