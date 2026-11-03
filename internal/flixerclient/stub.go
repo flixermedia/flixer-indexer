@@ -52,6 +52,10 @@ func (s *Stub) Settings(context.Context) (models.Settings, error) { return s.set
 
 func (s *Stub) PruneLibrary(context.Context, string, string) (int, error) { return 0, nil }
 
+func (s *Stub) DeleteItemsAtPaths(context.Context, string, []models.PathRemoval) (int, error) {
+	return 0, nil
+}
+
 func (s *Stub) IntroSyncCandidates(context.Context, string, string, string, int) ([]models.IntroSyncCandidate, string, error) {
 	return nil, "", nil
 }

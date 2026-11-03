@@ -30,6 +30,7 @@ type fakeAPI struct {
 	introUpdates          []models.IntroSegmentUpdate
 	lyricsUpdates         map[string]string
 	existingIntroSegments models.ExistingIntroSegments
+	removedTargets        []models.PathRemoval
 }
 
 func (f *fakeAPI) PruneLibrary(_ context.Context, libraryID, _ string) (int, error) {
@@ -37,6 +38,12 @@ func (f *fakeAPI) PruneLibrary(_ context.Context, libraryID, _ string) (int, err
 	defer f.mu.Unlock()
 	f.pruned = append(f.pruned, libraryID)
 	return 0, nil
+}
+func (f *fakeAPI) DeleteItemsAtPaths(_ context.Context, _ string, targets []models.PathRemoval) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.removedTargets = append(f.removedTargets, targets...)
+	return len(targets), nil
 }
 
 func (f *fakeAPI) Libraries(context.Context) ([]models.Library, error) { return f.libs, nil }
@@ -236,6 +243,50 @@ func TestTargetedScanQueuesSelectedJobsWithoutFullScanProgress(t *testing.T) {
 	work, err := decodeWork(asynq.NewTask(TypeIdentify, tasks[0].Payload))
 	if err != nil || len(work.Jobs) != 2 || !hasJob(work, "images", "descriptions") || !work.Untracked {
 		t.Fatalf("targeted work = %+v, %v", work, err)
+	}
+}
+
+func TestPathScanIndexesOnlyRequestedFileWithoutPruning(t *testing.T) {
+	root := t.TempDir()
+	first := filepath.Join(root, "First (2000).mkv")
+	second := filepath.Join(root, "Second (2001).mkv")
+	for _, path := range []string{first, second} {
+		if err := os.WriteFile(path, []byte("video"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lib := models.Library{ID: "lib", Type: models.LibraryMovies, Folders: []models.Folder{{RootID: "root", Path: "Movies", AbsolutePath: root}}}
+	api := &fakeAPI{libs: []models.Library{lib}}
+	mr := miniredis.RunT(t)
+	opt := asynq.RedisClientOpt{Addr: mr.Addr()}
+	queue := asynq.NewClient(opt)
+	defer queue.Close()
+	tracker := progress.New(redis.NewClient(&redis.Options{Addr: mr.Addr()}))
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	p := New(api, images.NewStore(t.TempDir(), "ffmpeg", "test"), fakeProbe{}, tracker, queue, logger)
+
+	payload, err := json.Marshal(models.ScanRequest{LibraryID: "lib", Paths: []string{first}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.handleScan(context.Background(), asynq.NewTask(TypeScan, payload)); err != nil {
+		t.Fatal(err)
+	}
+	inspector := asynq.NewInspector(opt)
+	defer inspector.Close()
+	tasks, err := inspector.ListPendingTasks(config.QueueIdentify)
+	if err != nil || len(tasks) != 1 {
+		t.Fatalf("identify tasks = %d, %v", len(tasks), err)
+	}
+	work, err := decodeWork(asynq.NewTask(TypeIdentify, tasks[0].Payload))
+	if err != nil || work.Item.Path != first || !work.Untracked {
+		t.Fatalf("identify work = %+v, %v; want only %s", work, err, first)
+	}
+	if scan, err := tracker.Get(context.Background(), "lib"); err != nil || scan != nil {
+		t.Fatalf("path scan changed progress: scan=%+v err=%v", scan, err)
+	}
+	if len(api.pruned) != 0 {
+		t.Fatalf("targeted scan pruned libraries: %v", api.pruned)
 	}
 }
 
@@ -530,6 +581,108 @@ func TestTaskSubjectFindsTheFileForEveryTaskType(t *testing.T) {
 		if lib != c.lib || path != c.path {
 			t.Errorf("%s: got %q %q, want %q %q", name, lib, path, c.lib, c.path)
 		}
+	}
+}
+
+func TestPathScanTaskLockUsesItsTargetPaths(t *testing.T) {
+	first, err := json.Marshal(models.ScanRequest{LibraryID: "L", Paths: []string{"/media/a.mkv", "/media/b.mkv"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reversed, err := json.Marshal(models.ScanRequest{LibraryID: "L", Paths: []string{"/media/b.mkv", "/media/a.mkv"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := json.Marshal(models.ScanRequest{LibraryID: "L", Paths: []string{"/media/c.mkv"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstKey := taskItemLockKey(TypeScan, first)
+	if firstKey != taskItemLockKey(TypeScan, reversed) {
+		t.Fatal("path-set lock changed with path order")
+	}
+	if firstKey == taskItemLockKey(TypeScan, other) {
+		t.Fatal("different path sets shared a scan lock")
+	}
+}
+
+func TestRemoveTaskDeletesOnlyRequestedPaths(t *testing.T) {
+	root := t.TempDir()
+	api := &fakeAPI{libs: []models.Library{{
+		ID: "lib", Type: models.LibraryMovies,
+		Folders: []models.Folder{{RootID: "root", AbsolutePath: root}},
+	}}}
+	p := &Pipeline{Client: api, Log: slog.New(slog.NewTextHandler(os.Stderr, nil))}
+	targets := []models.PathRemoval{
+		{Path: "/media/removed.mkv"},
+		{Path: "/media/removed-show", Recursive: true},
+	}
+	payload, err := json.Marshal(models.PathChangeRequest{LibraryID: "lib", Removed: targets})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.handleChange(context.Background(), asynq.NewTask(TypeChange, payload)); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.removedTargets) != len(targets) || api.removedTargets[0] != targets[0] || api.removedTargets[1] != targets[1] {
+		t.Fatalf("removed targets = %+v, want %+v", api.removedTargets, targets)
+	}
+}
+
+func TestRemoveTaskLockUsesTargetPathsOrderIndependently(t *testing.T) {
+	targets := []models.PathRemoval{{Path: "/media/a.mkv"}, {Path: "/media/show", Recursive: true}}
+	first, err := json.Marshal(models.PathChangeRequest{LibraryID: "L", Removed: targets})
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets[0], targets[1] = targets[1], targets[0]
+	reversed, err := json.Marshal(models.PathChangeRequest{LibraryID: "L", Removed: targets})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if taskItemLockKey(TypeChange, first) != taskItemLockKey(TypeChange, reversed) {
+		t.Fatal("change lock changed with target order")
+	}
+}
+
+func TestChangeTaskDeletesBeforeScanningReplacementPaths(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "Movie (2000).mkv")
+	if err := os.WriteFile(path, []byte("video"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lib := models.Library{ID: "lib", Type: models.LibraryMovies, Folders: []models.Folder{{RootID: "root", AbsolutePath: root}}}
+	api := &fakeAPI{libs: []models.Library{}}
+	api.libs = append(api.libs, lib)
+	mr := miniredis.RunT(t)
+	opt := asynq.RedisClientOpt{Addr: mr.Addr()}
+	queue := asynq.NewClient(opt)
+	defer queue.Close()
+	p := New(api, images.NewStore(t.TempDir(), "ffmpeg", "test"), fakeProbe{}, progress.New(redis.NewClient(&redis.Options{Addr: mr.Addr()})), queue,
+		slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	payload, err := json.Marshal(models.PathChangeRequest{
+		LibraryID: "lib",
+		Paths:     []string{path},
+		Removed:   []models.PathRemoval{{Path: path}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.handleChange(context.Background(), asynq.NewTask(TypeChange, payload)); err != nil {
+		t.Fatal(err)
+	}
+	inspector := asynq.NewInspector(opt)
+	defer inspector.Close()
+	tasks, err := inspector.ListPendingTasks(config.QueueIdentify)
+	if err != nil || len(tasks) != 1 {
+		t.Fatalf("identify tasks = %d, %v", len(tasks), err)
+	}
+	work, err := decodeWork(asynq.NewTask(TypeIdentify, tasks[0].Payload))
+	if err != nil || work.Item.Path != path {
+		t.Fatalf("replacement work = %+v, %v", work, err)
+	}
+	if len(api.removedTargets) != 1 || api.removedTargets[0].Path != path {
+		t.Fatalf("removed targets = %+v", api.removedTargets)
 	}
 }
 

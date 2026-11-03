@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -37,6 +39,7 @@ import (
 // Task types, one per stage.
 const (
 	TypeScan         = "scan:library"
+	TypeChange       = "change:paths"
 	TypeIdentify     = "identify:item"
 	TypeMetadata     = "metadata:fetch"
 	TypeImages       = "images:fetch"
@@ -266,7 +269,34 @@ func taskItemLockKey(typ string, payload []byte) string {
 	if typ == TypeScan {
 		var request models.ScanRequest
 		if json.Unmarshal(payload, &request) == nil {
-			libraryID, itemType, path = request.LibraryID, "library", "library"
+			libraryID = request.LibraryID
+			if len(request.Paths) == 0 {
+				itemType, path = "library", "library"
+			} else {
+				paths := make([]string, len(request.Paths))
+				for i, target := range request.Paths {
+					paths[i] = filepath.Clean(target)
+				}
+				sort.Strings(paths)
+				itemType, path = "paths", strings.Join(paths, "\x00")
+			}
+		}
+	}
+	if typ == TypeChange {
+		var request models.PathChangeRequest
+		if json.Unmarshal(payload, &request) == nil {
+			libraryID = request.LibraryID
+			targets := make([]string, 0, len(request.Paths)+len(request.Removed))
+			for _, target := range request.Paths {
+				targets = append(targets, "path:"+filepath.Clean(target))
+			}
+			for _, target := range request.Removed {
+				targets = append(targets, fmt.Sprintf("remove:%s:%t", filepath.Clean(target.Path), target.Recursive))
+			}
+			if len(targets) > 0 {
+				sort.Strings(targets)
+				itemType, path = "change", strings.Join(targets, "\x00")
+			}
 		}
 	}
 	if typ == TypeIntroMovie || typ == TypeIntroEpisode {
@@ -308,6 +338,11 @@ func (p *Pipeline) releaseFinishedTaskLock(ctx context.Context, task *asynq.Task
 // StartScan queues a scan of one library.
 func (p *Pipeline) StartScan(ctx context.Context, req models.ScanRequest) (bool, error) {
 	return p.Enqueue(ctx, config.QueueScan, TypeScan, req, 0)
+}
+
+// StartChange queues deletion and indexing for one batch of filesystem changes.
+func (p *Pipeline) StartChange(ctx context.Context, req models.PathChangeRequest) (bool, error) {
+	return p.Enqueue(ctx, config.QueueScan, TypeChange, req, maxRetry)
 }
 
 // StartRefresh queues a forced re-index of one item.
@@ -385,7 +420,7 @@ func (p *Pipeline) Handlers() map[string]map[string]asynq.HandlerFunc {
 
 func (p *Pipeline) handlers() map[string]map[string]asynq.HandlerFunc {
 	return map[string]map[string]asynq.HandlerFunc{
-		config.QueueScan:          {TypeScan: p.handleScan},
+		config.QueueScan:          {TypeScan: p.handleScan, TypeChange: p.handleChange},
 		config.QueueIdentify:      {TypeIdentify: p.handleIdentify},
 		config.QueueMetadata:      {TypeMetadata: p.handleMetadata},
 		config.QueueImages:        {TypeImages: p.handleImages},
@@ -433,6 +468,18 @@ func TaskSubject(typ string, payload []byte) (libraryID, itemType, path string) 
 		var req models.ScanRequest
 		if json.Unmarshal(payload, &req) == nil {
 			libraryID = req.LibraryID
+		}
+	case TypeChange:
+		var req models.PathChangeRequest
+		if json.Unmarshal(payload, &req) == nil {
+			libraryID = req.LibraryID
+			if len(req.Paths) > 0 {
+				path = req.Paths[0]
+				itemType = "change"
+			} else if len(req.Removed) > 0 {
+				path = req.Removed[0].Path
+				itemType = "removal"
+			}
 		}
 	case TypeRefresh:
 		var req models.RefreshRequest

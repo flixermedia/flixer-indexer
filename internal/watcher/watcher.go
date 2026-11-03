@@ -8,18 +8,21 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
 
 	"github.com/flixermedia/flixer-indexer/internal/models"
+	"github.com/flixermedia/flixer-indexer/internal/naming"
 )
 
 // Scanner is the part of the pipeline the watcher needs.
 type Scanner interface {
 	Libraries(ctx context.Context) ([]models.Library, error)
 	StartScan(ctx context.Context, req models.ScanRequest) (bool, error)
+	StartChange(ctx context.Context, req models.PathChangeRequest) (bool, error)
 }
 
 // Watcher turns filesystem changes into library scans.
@@ -37,9 +40,15 @@ type Watcher struct {
 	fs       *fsnotify.Watcher
 	dirs     map[string]string          // watched directory -> library id
 	roots    map[string]map[string]bool // library id -> watched root folders
-	pending  map[string]time.Time       // library id -> time of the last change
+	pending  map[string]*pendingScan    // library id -> changed paths and last change
 	lastScan map[string]time.Time
 	limitHit bool
+}
+
+type pendingScan struct {
+	paths     map[string]struct{}
+	removed   map[string]bool
+	changedAt time.Time
 }
 
 // partialSuffixes mark files other programs are still writing.
@@ -54,7 +63,7 @@ func (w *Watcher) Run(ctx context.Context) error {
 	defer w.fs.Close()
 	w.dirs = map[string]string{}
 	w.roots = map[string]map[string]bool{}
-	w.pending = map[string]time.Time{}
+	w.pending = map[string]*pendingScan{}
 	w.lastScan = map[string]time.Time{}
 	if w.Debounce <= 0 {
 		w.Debounce = 30 * time.Second
@@ -105,42 +114,178 @@ func (w *Watcher) handle(ev fsnotify.Event) {
 			return
 		}
 	}
+	path := filepath.Clean(ev.Name)
+	info, statErr := os.Stat(path)
+	_, watchedDir := w.dirs[path]
+	isDir := (statErr == nil && info.IsDir()) || watchedDir
 	if ev.Has(fsnotify.Create) {
-		if info, err := os.Stat(ev.Name); err == nil && info.IsDir() {
-			w.addTree(ev.Name, lib)
+		if isDir {
+			w.addTree(path, lib)
 		}
 	}
-	w.pending[lib] = time.Now()
+	if ev.Has(fsnotify.Remove) || ev.Has(fsnotify.Rename) {
+		if isDir || naming.IsVideo(path) || naming.IsAudio(path) {
+			pending := w.pendingFor(lib)
+			pending.removed[path] = pending.removed[path] || isDir
+			pending.changedAt = time.Now()
+			if isDir {
+				w.drop(path)
+			}
+		} else if target, relevant := scanTarget(path, false); relevant {
+			pending := w.pendingFor(lib)
+			pending.paths[target] = struct{}{}
+			pending.changedAt = time.Now()
+		}
+		return
+	}
+	path, relevant := scanTarget(path, isDir)
+	if !relevant {
+		return
+	}
+	pending := w.pendingFor(lib)
+	pending.paths[path] = struct{}{}
+	pending.changedAt = time.Now()
 }
 
-// flush scans libraries that have been quiet for the debounce period, plus those due a periodic rescan.
+func (w *Watcher) pendingFor(lib string) *pendingScan {
+	pending := w.pending[lib]
+	if pending == nil {
+		pending = &pendingScan{paths: map[string]struct{}{}, removed: map[string]bool{}}
+		w.pending[lib] = pending
+	}
+	return pending
+}
+
+func scanTarget(path string, isDir bool) (string, bool) {
+	if isDir || naming.IsVideo(path) || naming.IsAudio(path) {
+		return filepath.Clean(path), true
+	}
+	if naming.IsImage(path) {
+		return filepath.Dir(path), true
+	}
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".nfo", ".lrc", ".cue", ".srt", ".ass", ".ssa", ".vtt", ".sub", ".idx":
+		return filepath.Dir(path), true
+	default:
+		return "", false
+	}
+}
+
+// flush scans changed paths after they have been quiet for the debounce period, plus any due periodic rescans.
 func (w *Watcher) flush(ctx context.Context) {
 	now := time.Now()
-	for lib, last := range w.pending {
-		if now.Sub(last) >= w.Debounce {
+	for lib, pending := range w.pending {
+		if now.Sub(pending.changedAt) >= w.Debounce {
 			delete(w.pending, lib)
-			w.scan(ctx, lib, "files changed")
+			targets := compactRemovals(pending.removed)
+			paths := make([]string, 0, len(pending.paths))
+			for path := range pending.paths {
+				if _, err := os.Stat(path); err == nil {
+					paths = append(paths, path)
+				} else if !os.IsNotExist(err) {
+					w.Log.Warn("could not stat changed path", "library", lib, "path", path, "error", err)
+				}
+			}
+			paths = compactPaths(paths)
+			if len(paths) > 0 || len(targets) > 0 {
+				w.change(ctx, lib, targets, paths)
+			}
 		}
 	}
 	if w.Rescan > 0 {
 		for lib, last := range w.lastScan {
 			if now.Sub(last) >= w.Rescan {
-				w.scan(ctx, lib, "periodic rescan")
+				w.scan(ctx, lib, nil, "periodic rescan")
 			}
 		}
 	}
 }
 
-func (w *Watcher) scan(ctx context.Context, lib, reason string) {
+func (w *Watcher) change(ctx context.Context, lib string, removed []models.PathRemoval, paths []string) {
+	queued, err := w.Scanner.StartChange(ctx, models.PathChangeRequest{LibraryID: lib, Paths: paths, Removed: removed})
+	if err != nil {
+		w.Log.Warn("could not queue filesystem change", "library", lib, "error", err)
+		return
+	}
+	if queued {
+		w.Log.Info("filesystem change queued", "library", lib, "paths", len(paths), "removed", len(removed))
+	}
+}
+
+func (w *Watcher) scan(ctx context.Context, lib string, paths []string, reason string) {
 	w.lastScan[lib] = time.Now()
-	queued, err := w.Scanner.StartScan(ctx, models.ScanRequest{LibraryID: lib})
+	queued, err := w.Scanner.StartScan(ctx, models.ScanRequest{LibraryID: lib, Paths: paths})
 	if err != nil {
 		w.Log.Warn("could not queue automatic scan", "library", lib, "error", err)
 		return
 	}
 	if queued {
-		w.Log.Info("automatic scan queued", "library", lib, "reason", reason)
+		w.Log.Info("automatic scan queued", "library", lib, "paths", paths, "reason", reason)
 	}
+}
+
+func compactPaths(paths []string) []string {
+	sort.Slice(paths, func(i, j int) bool {
+		if len(paths[i]) == len(paths[j]) {
+			return paths[i] < paths[j]
+		}
+		return len(paths[i]) < len(paths[j])
+	})
+	compacted := make([]string, 0, len(paths))
+	for _, path := range paths {
+		covered := false
+		for _, parent := range compacted {
+			rel, err := filepath.Rel(parent, path)
+			if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			compacted = append(compacted, path)
+		}
+	}
+	sort.Strings(compacted)
+	return compacted
+}
+
+func compactRemovals(paths map[string]bool) []models.PathRemoval {
+	ordered := make([]string, 0, len(paths))
+	for path := range paths {
+		ordered = append(ordered, path)
+	}
+	sort.Slice(ordered, func(i, j int) bool {
+		if len(ordered[i]) == len(ordered[j]) {
+			return ordered[i] < ordered[j]
+		}
+		return len(ordered[i]) < len(ordered[j])
+	})
+	compacted := make([]models.PathRemoval, 0, len(ordered))
+	for _, path := range ordered {
+		recursive := paths[path]
+		covered := false
+		for i := range compacted {
+			parent := compacted[i].Path
+			rel, err := filepath.Rel(parent, path)
+			if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				continue
+			}
+			if rel == "." {
+				compacted[i].Recursive = compacted[i].Recursive || recursive
+				covered = true
+				break
+			}
+			if compacted[i].Recursive {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			compacted = append(compacted, models.PathRemoval{Path: path, Recursive: recursive})
+		}
+	}
+	sort.Slice(compacted, func(i, j int) bool { return compacted[i].Path < compacted[j].Path })
+	return compacted
 }
 
 // sync reconciles the watched folders with flixer's libraries.
@@ -224,7 +369,9 @@ func (w *Watcher) drop(root string) {
 	prefix := root + string(filepath.Separator)
 	for dir := range w.dirs {
 		if dir == root || strings.HasPrefix(dir, prefix) {
-			_ = w.fs.Remove(dir)
+			if w.fs != nil {
+				_ = w.fs.Remove(dir)
+			}
 			delete(w.dirs, dir)
 		}
 	}

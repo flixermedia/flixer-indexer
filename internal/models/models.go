@@ -262,13 +262,27 @@ type Work struct {
 	Untracked bool `json:"untracked,omitempty"`
 }
 
-// ScanRequest starts a scan of a library.
+// ScanRequest starts a scan of a library, optionally limited to filesystem paths.
 type ScanRequest struct {
 	LibraryID     string   `json:"libraryId"`
+	Paths         []string `json:"paths,omitempty"`
 	Force         bool     `json:"force,omitempty"`
 	TrickplayOnly bool     `json:"trickplayOnly,omitempty"`
 	TrackProgress bool     `json:"trackProgress,omitempty"`
 	Jobs          []string `json:"jobs,omitempty"`
+}
+
+// PathRemoval identifies an indexed filesystem path to remove; recursive removes a directory subtree.
+type PathRemoval struct {
+	Path      string `json:"path"`
+	Recursive bool   `json:"recursive"`
+}
+
+// PathChangeRequest applies removals before indexing paths from one filesystem event batch.
+type PathChangeRequest struct {
+	LibraryID string        `json:"libraryId"`
+	Paths     []string      `json:"paths,omitempty"`
+	Removed   []PathRemoval `json:"removed,omitempty"`
 }
 
 // RefreshRequest re-runs the pipeline for one item.

@@ -82,6 +82,32 @@ func TestUpsertItemLyrics(t *testing.T) {
 	}
 }
 
+func TestDeleteItemsAtPaths(t *testing.T) {
+	c := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != librariesPath+"/lib"+librariesPathSuffix {
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+		}
+		var body struct {
+			Targets []models.PathRemoval `json:"targets"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if len(body.Targets) != 2 || body.Targets[0] != (models.PathRemoval{Path: "/movies/a.mkv"}) ||
+			body.Targets[1] != (models.PathRemoval{Path: "/movies/show", Recursive: true}) {
+			t.Errorf("targets = %+v", body.Targets)
+		}
+		_, _ = w.Write([]byte(`{"removed":3}`))
+	})
+	removed, err := c.DeleteItemsAtPaths(context.Background(), "lib", []models.PathRemoval{
+		{Path: "/movies/a.mkv"},
+		{Path: "/movies/show", Recursive: true},
+	})
+	if err != nil || removed != 3 {
+		t.Fatalf("removed = %d, err = %v", removed, err)
+	}
+}
+
 func TestIntroSyncContract(t *testing.T) {
 	c := serve(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

@@ -39,10 +39,11 @@ func (p *Pipeline) handleScan(ctx context.Context, t *asynq.Task) error {
 	if err := validateScanJobs(req.Jobs); err != nil {
 		return fmt.Errorf("%w: %w", err, asynq.SkipRetry)
 	}
-	if len(req.Jobs) > 0 && req.TrickplayOnly {
-		return fmt.Errorf("trickplay-only cannot be combined with scan jobs: %w", asynq.SkipRetry)
+	if req.TrickplayOnly && (len(req.Jobs) > 0 || len(req.Paths) > 0) {
+		return fmt.Errorf("trickplay-only cannot be combined with scan jobs or paths: %w", asynq.SkipRetry)
 	}
-	tracked := req.TrackProgress || (len(req.Jobs) == 0 && !req.TrickplayOnly)
+	fullLibraryScan := len(req.Paths) == 0
+	tracked := req.TrackProgress || (fullLibraryScan && len(req.Jobs) == 0 && !req.TrickplayOnly)
 	if tracked {
 		if err := p.Progress.Start(ctx, lib.ID); err != nil {
 			return err
@@ -53,10 +54,10 @@ func (p *Pipeline) handleScan(ctx context.Context, t *asynq.Task) error {
 	}
 	p.logger(ctx).Info("scan started", "library", lib.ID, "name", lib.Name, "type", lib.Type)
 
-	err = scanner.Scan(ctx, lib, func(w models.Work) error {
+	emit := func(w models.Work) error {
 		w.Force = req.Force
 		w.Jobs = req.Jobs
-		w.Untracked = len(req.Jobs) > 0 && !req.TrackProgress
+		w.Untracked = (len(req.Jobs) > 0 || !fullLibraryScan) && !req.TrackProgress
 		queued, err := p.Enqueue(ctx, config.QueueIdentify, TypeIdentify, w, maxRetry)
 		if err != nil {
 			return err
@@ -65,7 +66,16 @@ func (p *Pipeline) handleScan(ctx context.Context, t *asynq.Task) error {
 			return p.Progress.Discovered(ctx, lib.ID)
 		}
 		return nil
-	})
+	}
+	if fullLibraryScan {
+		err = scanner.Scan(ctx, lib, emit)
+	} else {
+		for _, path := range req.Paths {
+			if err = scanner.ScanBranch(ctx, lib, path, emit); err != nil {
+				break
+			}
+		}
+	}
 	if err != nil {
 		if tracked {
 			_ = p.Progress.WalkFailed(context.WithoutCancel(ctx), lib.ID, err)
@@ -79,11 +89,55 @@ func (p *Pipeline) handleScan(ctx context.Context, t *asynq.Task) error {
 		}
 		return nil
 	}
+	if !tracked {
+		return nil
+	}
 	if err := p.Progress.WalkDone(ctx, lib.ID); err != nil {
 		return err
 	}
-	// An empty walk completes immediately, with no item left to trigger the prune.
-	p.pruneIfComplete(ctx, lib.ID)
+	// Targeted scans must not prune items outside the paths they visited.
+	if fullLibraryScan {
+		// An empty walk completes immediately, with no item left to trigger the prune.
+		p.pruneIfComplete(ctx, lib.ID)
+	}
+	return nil
+}
+
+func (p *Pipeline) handleChange(ctx context.Context, t *asynq.Task) error {
+	var req models.PathChangeRequest
+	if err := json.Unmarshal(t.Payload(), &req); err != nil || req.LibraryID == "" || (len(req.Paths) == 0 && len(req.Removed) == 0) {
+		return fmt.Errorf("bad path change payload: %w", asynq.SkipRetry)
+	}
+	for _, target := range req.Removed {
+		if target.Path == "" {
+			return fmt.Errorf("bad removal path: %w", asynq.SkipRetry)
+		}
+	}
+	for _, path := range req.Paths {
+		if path == "" {
+			return fmt.Errorf("bad scan path: %w", asynq.SkipRetry)
+		}
+	}
+	lib, err := p.Library(ctx, req.LibraryID)
+	if err != nil {
+		return err
+	}
+	if len(req.Removed) > 0 {
+		removed, err := p.Client.DeleteItemsAtPaths(ctx, req.LibraryID, req.Removed)
+		if err != nil {
+			return err
+		}
+		p.logger(ctx).Info("removed indexed items at changed paths", "library", req.LibraryID, "targets", len(req.Removed), "removed", removed)
+	}
+	for _, path := range req.Paths {
+		if err := scanner.ScanBranch(ctx, lib, path, func(w models.Work) error {
+			w.Untracked = true
+			_, err := p.Enqueue(ctx, config.QueueIdentify, TypeIdentify, w, maxRetry)
+			return err
+		}); err != nil {
+			return fmt.Errorf("scan changed path %s: %w: %w", path, err, asynq.SkipRetry)
+		}
+	}
 	return nil
 }
 

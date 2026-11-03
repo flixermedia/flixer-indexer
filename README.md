@@ -84,6 +84,8 @@ flowchart LR
 
 Provider credentials are fallback values; settings fetched from Flixer take precedence. See [`.env.example`](.env.example) and [`flixer-indexer-SPEC.md`](flixer-indexer-SPEC.md).
 
+Filesystem events scan only the changed media file or folder subtree. Removed or renamed items are deleted by exact path (or by subtree for removed directories), then any replacement paths from the same event batch are indexed. Artwork and metadata sidecars rescan their containing folder. Optional periodic rescans remain full-library scans for network shares that do not emit filesystem events.
+
 ## 🔌 Internal API
 
 | Route | Function |

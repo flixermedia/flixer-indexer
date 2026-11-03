@@ -21,12 +21,13 @@ import (
 
 // Endpoints flixer is expected to expose.
 const (
-	librariesPath = "/api/indexer/libraries"
-	settingsPath  = "/api/indexer/settings"
-	itemsPath     = "/api/indexer/media/items"
-	lyricsPath    = "/api/indexer/media/items/"
-	introSyncPath = "/api/indexer/media/intro-sync"
-	introSavePath = "/api/indexer/media/intro-segments"
+	librariesPath       = "/api/indexer/libraries"
+	settingsPath        = "/api/indexer/settings"
+	itemsPath           = "/api/indexer/media/items"
+	lyricsPath          = "/api/indexer/media/items/"
+	introSyncPath       = "/api/indexer/media/intro-sync"
+	introSavePath       = "/api/indexer/media/intro-segments"
+	librariesPathSuffix = "/remove-paths"
 )
 
 // API is everything the indexer needs from flixer.
@@ -46,6 +47,8 @@ type API interface {
 	// PruneLibrary deletes the library's items not seen since the given scan
 	// start (RFC 3339) and returns how many were removed.
 	PruneLibrary(ctx context.Context, libraryID, scanStartedAt string) (int, error)
+	// DeleteItemsAtPaths removes indexed items at exact paths or recursively within directory paths.
+	DeleteItemsAtPaths(ctx context.Context, libraryID string, targets []models.PathRemoval) (int, error)
 }
 
 // ErrPermanent marks a response that retrying will not fix.
@@ -181,6 +184,17 @@ func (c *Client) PruneLibrary(ctx context.Context, libraryID, scanStartedAt stri
 	}
 	path := librariesPath + "/" + url.PathEscape(libraryID) + "/prune"
 	if err := c.do(ctx, http.MethodPost, path, map[string]string{"scanStartedAt": scanStartedAt}, &body); err != nil {
+		return 0, err
+	}
+	return body.Removed, nil
+}
+
+func (c *Client) DeleteItemsAtPaths(ctx context.Context, libraryID string, targets []models.PathRemoval) (int, error) {
+	var body struct {
+		Removed int `json:"removed"`
+	}
+	path := librariesPath + "/" + url.PathEscape(libraryID) + librariesPathSuffix
+	if err := c.do(ctx, http.MethodPost, path, map[string][]models.PathRemoval{"targets": targets}, &body); err != nil {
 		return 0, err
 	}
 	return body.Removed, nil

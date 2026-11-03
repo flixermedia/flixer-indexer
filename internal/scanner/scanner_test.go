@@ -190,6 +190,15 @@ func TestScanBranch(t *testing.T) {
 		t.Fatalf("season branch = %d items", len(got))
 	}
 
+	got = nil
+	episodePath := filepath.Join(root, "Show (2020)", "Season 1", "Show S01E01.mkv")
+	if err := ScanBranch(context.Background(), l, episodePath, collectInto); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Item.Path != episodePath || got[0].Item.Type != models.ItemEpisode {
+		t.Fatalf("file branch = %+v, want only %s", got, episodePath)
+	}
+
 	if err := ScanBranch(context.Background(), l, filepath.Join(root, "Missing"), collectInto); err == nil {
 		t.Error("expected an error for a path with no items")
 	}
