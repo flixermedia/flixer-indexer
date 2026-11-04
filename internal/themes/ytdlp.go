@@ -1,7 +1,10 @@
 package themes
 
 import (
+	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -10,14 +13,17 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 )
 
 const (
-	releaseBase = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/"
-	refreshAge  = 14 * 24 * time.Hour
-	maxBinary   = 100 << 20
+	releaseBase          = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/"
+	refreshAge           = 14 * 24 * time.Hour
+	maxBinary            = 100 << 20
+	checksumFile         = "SHA2-256SUMS"
+	maxChecksumSizeBytes = 64 << 10
 )
 
 // YTDLP locates yt-dlp, downloading the project's standalone release into the
@@ -100,7 +106,13 @@ func (y *YTDLP) download(ctx context.Context, asset, dest string) error {
 	if err := os.MkdirAll(y.Dir, 0o755); err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, y.BaseURL+asset, nil)
+	expectedHash, err := y.fetchExpectedChecksum(ctx, asset)
+	if err != nil {
+		return fmt.Errorf("verify yt-dlp checksum: %w", err)
+	}
+
+	baseURL := strings.TrimRight(y.BaseURL, "/") + "/"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+asset, nil)
 	if err != nil {
 		return err
 	}
@@ -120,12 +132,21 @@ func (y *YTDLP) download(ctx context.Context, asset, dest string) error {
 		return err
 	}
 	name := tmp.Name()
-	n, err := io.Copy(tmp, io.LimitReader(resp.Body, maxBinary+1))
+
+	hasher := sha256.New()
+	writer := io.MultiWriter(tmp, hasher)
+	n, err := io.Copy(writer, io.LimitReader(resp.Body, maxBinary+1))
 	if cerr := tmp.Close(); err == nil {
 		err = cerr
 	}
 	if err == nil && (n == 0 || n > maxBinary) {
 		err = errors.New("downloaded yt-dlp has an unexpected size")
+	}
+	if err == nil {
+		actualHash := hex.EncodeToString(hasher.Sum(nil))
+		if !strings.EqualFold(actualHash, expectedHash) {
+			err = fmt.Errorf("checksum mismatch for %s: got %s, want %s", asset, actualHash, expectedHash)
+		}
 	}
 	if err == nil {
 		err = os.Chmod(name, 0o755)
@@ -138,4 +159,54 @@ func (y *YTDLP) download(ctx context.Context, asset, dest string) error {
 		return err
 	}
 	return nil
+}
+
+func (y *YTDLP) fetchExpectedChecksum(ctx context.Context, asset string) (string, error) {
+	baseURL := strings.TrimRight(y.BaseURL, "/") + "/"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+checksumFile, nil)
+	if err != nil {
+		return "", err
+	}
+	if y.UserAgent != "" {
+		req.Header.Set("User-Agent", y.UserAgent)
+	}
+	resp, err := y.HTTP.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("download %s: %w", checksumFile, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("download %s: status %d", checksumFile, resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxChecksumSizeBytes))
+	if err != nil {
+		return "", fmt.Errorf("read %s: %w", checksumFile, err)
+	}
+	return parseChecksum(string(body), asset)
+}
+
+func parseChecksum(content, asset string) (string, error) {
+	scanner := bufio.NewScanner(strings.NewReader(content))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		hash := fields[0]
+		fileName := strings.TrimPrefix(fields[1], "*")
+		if fileName == asset {
+			if len(hash) != 64 {
+				return "", fmt.Errorf("invalid sha256 hash length for %s", asset)
+			}
+			return strings.ToLower(hash), nil
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return "", err
+	}
+	return "", fmt.Errorf("asset %q not found in %s", asset, checksumFile)
 }
