@@ -175,6 +175,17 @@ func TestTaskLogsEndpoint(t *testing.T) {
 	}
 }
 
+func TestClearFailedSkipsPriorityQueueThatHasNeverExisted(t *testing.T) {
+	h := newServer(t)
+	rec := do(h, http.MethodPost, "/internal/queues/identify/clear-failed", nil, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("clear failed = %d %s, want 200", rec.Code, rec.Body)
+	}
+	if !strings.Contains(rec.Body.String(), `"cleared":0`) {
+		t.Fatalf("unexpected clear response %s", rec.Body)
+	}
+}
+
 func TestCheckPluginResponse(t *testing.T) {
 	for output, wantOK := range map[string]bool{
 		`{"result":{"ok":true}}`:                         true,

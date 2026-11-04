@@ -582,10 +582,22 @@ func (s *Server) clearFailed(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "unknown queue")
 		return
 	}
+	existingQueues, err := s.Inspector.Queues()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not list task queues")
+		return
+	}
+	existing := make(map[string]struct{}, len(existingQueues))
+	for _, existingQueue := range existingQueues {
+		existing[existingQueue] = struct{}{}
+	}
 	total := 0
 	for _, physicalQueue := range config.QueueGroup(queue) {
+		if _, ok := existing[physicalQueue]; !ok {
+			continue
+		}
 		n, err := s.Inspector.DeleteAllArchivedTasks(physicalQueue)
-		if err != nil && !errors.Is(err, asynq.ErrQueueNotFound) {
+		if err != nil {
 			writeError(w, http.StatusInternalServerError, "could not clear failed tasks")
 			return
 		}
