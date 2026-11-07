@@ -63,7 +63,6 @@ func (s *Server) Handler() http.Handler {
 	signed.HandleFunc("GET /internal/scans", s.scans)
 	signed.HandleFunc("GET /internal/stats", s.stats)
 	signed.HandleFunc("GET /internal/tasks", s.tasks)
-	signed.HandleFunc("GET /internal/tasks/{queue}/{id}/logs", s.taskLogs)
 	signed.HandleFunc("POST /internal/tasks/{queue}/{id}/cancel", s.cancelTask)
 	signed.HandleFunc("POST /internal/tasks/{queue}/{id}/retry", s.retryTask)
 	signed.HandleFunc("POST /internal/queues/{queue}/cancel-active", s.cancelActive)
@@ -413,30 +412,6 @@ func (s *Server) tasks(w http.ResponseWriter, r *http.Request) {
 		out = append(out, v)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"queue": queue, "state": state, "page": page, "tasks": out})
-}
-
-// taskLogs returns a task's recorded log lines from offset on, plus the task's current state when it still exists.
-func (s *Server) taskLogs(w http.ResponseWriter, r *http.Request) {
-	queue, id := r.PathValue("queue"), r.PathValue("id")
-	if !slices.Contains(config.Queues, queue) || id == "" || len(id) > 64 {
-		writeError(w, http.StatusNotFound, "task not found")
-		return
-	}
-	if s.Pipeline == nil || s.Pipeline.TaskLogs == nil {
-		writeError(w, http.StatusServiceUnavailable, "task logs are not available")
-		return
-	}
-	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
-	entries, total, err := s.Pipeline.TaskLogs.Read(r.Context(), queue, id, offset)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not read task logs")
-		return
-	}
-	state := ""
-	if info, err := s.Inspector.GetTaskInfo(queue, id); err == nil {
-		state = info.State.String()
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"queue": queue, "id": id, "state": state, "total": total, "entries": entries})
 }
 
 func (s *Server) cancelTask(w http.ResponseWriter, r *http.Request) {

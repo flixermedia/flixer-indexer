@@ -8,11 +8,13 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/flixermedia/flixer-indexer/internal/auth"
 	"github.com/flixermedia/flixer-indexer/internal/models"
+	"github.com/flixermedia/flixer-indexer/internal/tasklog"
 )
 
 var secret = []byte("s3cret")
@@ -37,6 +39,10 @@ func TestLibrariesNormalizesStorage(t *testing.T) {
 		if r.URL.Path != librariesPath {
 			t.Errorf("path = %s", r.URL.Path)
 		}
+		if r.Header.Get("traceparent") != "" {
+			t.Error("non-task request unexpectedly received task correlation")
+		}
+
 		_, _ = w.Write([]byte(`{"libraries":[{"id":"a","type":"movies","imageStorage":"weird","folders":[]},{"id":"b","type":"music","imageStorage":"alongside","folders":[]}]}`))
 	})
 	libs, err := c.Libraries(context.Background())
@@ -45,6 +51,30 @@ func TestLibrariesNormalizesStorage(t *testing.T) {
 	}
 	if libs[0].ImageStorage != models.StorageCache || libs[1].ImageStorage != models.StorageAlongside {
 		t.Errorf("storage = %q, %q", libs[0].ImageStorage, libs[1].ImageStorage)
+	}
+}
+
+func TestTaskRequestsPropagateTraceparent(t *testing.T) {
+	ctx := tasklog.WithTask(context.Background(), "scan", "task-1")
+	wantTrace := strings.Split(tasklog.Traceparent(ctx), "-")[1]
+	var spans []string
+	c := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		header := r.Header.Get("traceparent")
+		parts := strings.Split(header, "-")
+		if len(parts) != 4 || parts[0] != "00" || parts[1] != wantTrace || len(parts[2]) != 16 || parts[3] != "01" {
+			t.Errorf("unexpected traceparent %q", header)
+		} else {
+			spans = append(spans, parts[2])
+		}
+		_, _ = w.Write([]byte(`{"libraries":[]}`))
+	})
+	for range 2 {
+		if _, err := c.Libraries(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(spans) != 2 || spans[0] == spans[1] {
+		t.Fatalf("request spans must be distinct: %v", spans)
 	}
 }
 

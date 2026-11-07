@@ -3,72 +3,45 @@ package tasklog
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"log/slog"
-	"strings"
 	"testing"
-
-	"github.com/alicebob/miniredis/v2"
-	"github.com/redis/go-redis/v9"
 )
 
-func newStore(t *testing.T) *Store {
-	t.Helper()
-	mr := miniredis.RunT(t)
-	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	t.Cleanup(func() { rdb.Close() })
-	return New(rdb)
-}
+func TestTaskLoggerCorrelatesNormalAndSuppressedRecords(t *testing.T) {
+	var normal, fallback bytes.Buffer
+	base := slog.New(slog.NewJSONHandler(&normal, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	store := NewWithFallback(slog.NewJSONHandler(&fallback, nil))
+	ctx := WithTask(context.Background(), "scan", "task-1")
+	logger := Logger(ctx, store, base).With("library", "movies")
+	logger.Info("started")
+	logger.Warn("failed")
 
-func TestLoggerRecordsOnlyInsideATask(t *testing.T) {
-	store := newStore(t)
-	var out bytes.Buffer
-	base := slog.New(slog.NewTextHandler(&out, &slog.HandlerOptions{Level: slog.LevelWarn}))
-
-	base2 := Logger(context.Background(), store, base)
-	if base2 != base {
-		t.Fatal("outside a task the base logger must be returned")
+	if normal.Len() == 0 || fallback.Len() == 0 {
+		t.Fatalf("task output missing from normal or fallback logger: normal=%q fallback=%q", normal.String(), fallback.String())
 	}
-
-	ctx := WithTask(context.Background(), "probe", "t1")
-	log := Logger(ctx, store, base).With("library", "L1")
-	log.Info("scan started", "name", "Movies")
-	log.Warn("probe failed", "error", "boom")
-	log.Debug("hidden")
-
-	entries, total, err := store.Read(context.Background(), "probe", "t1", 0)
-	if err != nil {
+	if bytes.Contains(normal.Bytes(), []byte("started")) || !bytes.Contains(normal.Bytes(), []byte("failed")) {
+		t.Fatalf("normal logger did not preserve its level: %s", normal.String())
+	}
+	var event map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace([]byte(fallback.String())), &event); err != nil {
 		t.Fatal(err)
 	}
-	if total != 2 || len(entries) != 2 {
-		t.Fatalf("want 2 entries, got total=%d entries=%v", total, entries)
+	if event["msg"] != "started" || event["task_id"] != "task-1" || event["task_queue"] != "scan" ||
+		event["library"] != "movies" || event["trace_id"] != taskTraceID("scan", "task-1") {
+		t.Fatalf("task correlation missing: %+v", event)
 	}
-	if entries[0].Level != "INFO" || !strings.Contains(entries[0].Message, "scan started library=L1 name=Movies") {
-		t.Errorf("unexpected first entry %+v", entries[0])
-	}
-	if entries[1].Level != "WARN" || !strings.Contains(entries[1].Message, "error=boom") {
-		t.Errorf("unexpected second entry %+v", entries[1])
-	}
-	if strings.Contains(out.String(), "scan started") || !strings.Contains(out.String(), "probe failed") {
-		t.Errorf("base logger must still honour its own level, got %q", out.String())
-	}
-
-	rest, total, _ := store.Read(context.Background(), "probe", "t1", 1)
-	if total != 2 || len(rest) != 1 || rest[0].Level != "WARN" {
-		t.Errorf("offset read returned %v (total %d)", rest, total)
-	}
-	none, _, _ := store.Read(context.Background(), "probe", "missing", 0)
-	if len(none) != 0 {
-		t.Errorf("unknown task must have no entries")
+	if InTask(context.Background()) || !InTask(ctx) {
+		t.Fatal("task context detection failed")
 	}
 }
 
-func TestAppendStopsAtTheCap(t *testing.T) {
-	store := newStore(t)
-	for i := 0; i < MaxEntries+25; i++ {
-		store.Append(context.Background(), "scan", "t", Entry{Message: "x"})
+func TestLoggerReturnsBaseOutsideTasksOrWhenDisabled(t *testing.T) {
+	base := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+	if got := Logger(context.Background(), NewWithFallback(nil), base); got != base {
+		t.Fatal("non-task context should return the base logger")
 	}
-	_, total, _ := store.Read(context.Background(), "scan", "t", 0)
-	if total != MaxEntries {
-		t.Fatalf("total = %d, want %d", total, MaxEntries)
+	if got := Logger(WithTask(context.Background(), "scan", "task-1"), nil, base); got != base {
+		t.Fatal("nil task logger should return the base logger")
 	}
 }

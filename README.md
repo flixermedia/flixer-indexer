@@ -84,6 +84,33 @@ flowchart LR
 
 Provider credentials are fallback values; settings fetched from Flixer take precedence. See [`.env.example`](.env.example) and [`flixer-indexer-SPEC.md`](flixer-indexer-SPEC.md).
 
+### Experimental Flixer Logger export
+
+The indexer enrolls using its shared application secret when `FLIXER_URL` is
+HTTPS or literal loopback HTTP, or `FLIXER_LOGGER_CONTROL_SOCKET` selects
+Flixer's protected local Unix socket, and Flixer has a configured logger. Credentials
+are bound to `flixer-indexer`; they are not sent over non-loopback plaintext.
+Logging is asynchronous and bounded, with possible loss on overload, outages,
+configuration changes or shutdown. Configuration is checked every five
+seconds; events can still reach the previous deployment before the next check.
+The shared secret is not an individual service identity. Stdout and Sentry
+remain active; task output is no longer stored in Redis or exposed through the
+Indexer API. Task events are tagged with task ID and physical queue and sent
+through the same bounded asynchronous Logger exporter as other Indexer events.
+Records at INFO and above are exported even when `LOG_LEVEL` suppresses them
+from stdout. Delivery remains best effort, and the Logger task view is the
+source for task history. Redaction is best effort; never put secrets in log
+messages.
+Indexer task logs include a trace ID derived from the physical queue and task
+ID, stable across retries. Requests made by a task to Flixer carry that trace
+in a W3C `traceparent` header with a distinct span ID per request. This links
+task events with Flixer request logs when both are exported; it does not yet
+propagate an originating caller's trace or correlate non-task requests.
+
+The checked-in `third_party/flixer-logger` snapshot supports independent
+builds before the logger module is published. Refresh it from the logger
+repository with `bash scripts/vendor-go-sdk.sh /path/to/flixer-indexer`.
+
 Filesystem events scan only the changed media file or folder subtree. Removed or renamed items are deleted by exact path (or by subtree for removed directories), then any replacement paths from the same event batch are indexed. Artwork and metadata sidecars rescan their containing folder. Optional periodic rescans remain full-library scans for network shares that do not emit filesystem events.
 
 ## 🔌 Internal API

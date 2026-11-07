@@ -85,7 +85,7 @@ type Pipeline struct {
 	Queue     *asynq.Client
 	TaskLocks redis.UniversalClient
 	Log       *slog.Logger
-	// TaskLogs records each task's log output; nil disables it.
+	// TaskLogs adds Logger correlation to task records; nil disables it.
 	TaskLogs         *tasklog.Store
 	Trickplay        *trickplay.Generator
 	TrickplayEnabled bool

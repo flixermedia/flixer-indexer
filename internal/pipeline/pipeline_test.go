@@ -290,6 +290,47 @@ func TestPathScanIndexesOnlyRequestedFileWithoutPruning(t *testing.T) {
 	}
 }
 
+func TestFolderScanIndexesSelectedBranchWithoutPruning(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"Selected/movie.mkv", "Other/movie.mkv"} {
+		path := filepath.Join(root, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("video"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lib := models.Library{ID: "lib", Type: models.LibraryMovies, Folders: []models.Folder{{RootID: "root", AbsolutePath: root}}}
+	api := &fakeAPI{libs: []models.Library{lib}}
+	mr := miniredis.RunT(t)
+	opt := asynq.RedisClientOpt{Addr: mr.Addr()}
+	queue := asynq.NewClient(opt)
+	defer queue.Close()
+	tracker := progress.New(redis.NewClient(&redis.Options{Addr: mr.Addr()}))
+	p := New(api, images.NewStore(t.TempDir(), "ffmpeg", "test"), fakeProbe{}, tracker, queue, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	payload, err := json.Marshal(models.ScanRequest{LibraryID: "lib", Paths: []string{filepath.Join(root, "Selected")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.handleScan(context.Background(), asynq.NewTask(TypeScan, payload)); err != nil {
+		t.Fatal(err)
+	}
+	inspector := asynq.NewInspector(opt)
+	defer inspector.Close()
+	tasks, err := inspector.ListPendingTasks(config.QueueIdentify)
+	if err != nil || len(tasks) != 1 {
+		t.Fatalf("identify tasks = %d, %v", len(tasks), err)
+	}
+	work, err := decodeWork(asynq.NewTask(TypeIdentify, tasks[0].Payload))
+	if err != nil || work.Item.Path != filepath.Join(root, "Selected", "movie.mkv") || !work.Untracked {
+		t.Fatalf("folder scan work = %+v, %v", work, err)
+	}
+	if len(api.pruned) != 0 {
+		t.Fatalf("folder scan pruned libraries: %v", api.pruned)
+	}
+}
+
 func TestTrackedTargetedScanCompletesAfterItemPipeline(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "movie.mkv"), []byte("video"), 0o644); err != nil {

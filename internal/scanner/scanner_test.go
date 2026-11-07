@@ -191,6 +191,14 @@ func TestScanBranch(t *testing.T) {
 	}
 
 	got = nil
+	if err := ScanFolderBranch(context.Background(), l, filepath.Join(root, "Show (2020)", "Season 2"), collectInto); err != nil {
+		t.Fatal(err)
+	}
+	if count(got, models.ItemSeason) != 1 || count(got, models.ItemEpisode) != 1 || count(got, models.ItemSeries) != 1 {
+		t.Fatalf("folder branch = %+v", got)
+	}
+
+	got = nil
 	episodePath := filepath.Join(root, "Show (2020)", "Season 1", "Show S01E01.mkv")
 	if err := ScanBranch(context.Background(), l, episodePath, collectInto); err != nil {
 		t.Fatal(err)
@@ -201,5 +209,27 @@ func TestScanBranch(t *testing.T) {
 
 	if err := ScanBranch(context.Background(), l, filepath.Join(root, "Missing"), collectInto); err == nil {
 		t.Error("expected an error for a path with no items")
+	}
+
+	empty := filepath.Join(root, "Empty")
+	if err := os.Mkdir(empty, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	got = nil
+	if err := ScanFolderBranch(context.Background(), lib(models.LibraryMovies, root), empty, collectInto); err != nil || len(got) != 0 {
+		t.Fatalf("empty branch = %+v, %v", got, err)
+	}
+}
+
+func TestScanBranchMusicDiscIncludesAlbum(t *testing.T) {
+	root := t.TempDir()
+	touch(t, root, "Artist/Album/Disc 1/01 - First.mp3", "Artist/Album/Disc 2/02 - Second.mp3")
+	var got []models.Work
+	target := filepath.Join(root, "Artist", "Album", "Disc 1")
+	if err := ScanFolderBranch(context.Background(), lib(models.LibraryMusic, root), target, func(w models.Work) error { got = append(got, w); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if count(got, models.ItemAlbum) != 1 || count(got, models.ItemTrack) != 1 {
+		t.Fatalf("disc branch = %+v", got)
 	}
 }

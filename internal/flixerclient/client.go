@@ -17,6 +17,7 @@ import (
 
 	"github.com/flixermedia/flixer-indexer/internal/auth"
 	"github.com/flixermedia/flixer-indexer/internal/models"
+	"github.com/flixermedia/flixer-indexer/internal/tasklog"
 )
 
 // Endpoints flixer is expected to expose.
@@ -83,6 +84,9 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 	}
 	if in != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	if traceparent := tasklog.Traceparent(ctx); traceparent != "" {
+		req.Header.Set("traceparent", traceparent)
 	}
 	auth.Sign(c.secret, req, body, time.Now())
 

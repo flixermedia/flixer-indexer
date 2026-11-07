@@ -4,12 +4,11 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
-	"io"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 	"time"
 
@@ -34,6 +33,7 @@ import (
 	"github.com/flixermedia/flixer-indexer/internal/tasklog"
 	"github.com/flixermedia/flixer-indexer/internal/themes"
 	"github.com/flixermedia/flixer-indexer/internal/watcher"
+	"github.com/flixermedia/flixer-logger/pkg/exporter"
 )
 
 func main() {
@@ -48,19 +48,25 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	var logOutput io.Writer = os.Stdout
-	if cfg.LogDir != "" {
-		if err := os.MkdirAll(cfg.LogDir, 0o755); err != nil {
-			return errors.New("create log directory: " + err.Error())
+	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel})).With("app", "flixer-indexer")
+	var taskFallback slog.Handler
+	if !cfg.Stub {
+		handler, logging, logErr := exporter.StartServiceWithControlSocket(log.Handler(), cfg.FlixerURL, os.Getenv("FLIXER_LOGGER_CONTROL_SOCKET"), "flixer-indexer",
+			func() ([]byte, error) { return cfg.Secret, nil }, os.Stderr)
+		if logErr != nil {
+			log.Warn("Flixer Logger export unavailable", "error", logErr)
+		} else {
+			log = slog.New(handler)
+			taskFallback = logging.TaskHandler()
+			defer func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				defer cancel()
+				if err := logging.Close(ctx); err != nil {
+					fmt.Fprintln(os.Stderr, "Flixer Logger export shutdown:", err)
+				}
+			}()
 		}
-		file, err := os.OpenFile(filepath.Join(cfg.LogDir, "indexer.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
-		if err != nil {
-			return errors.New("open log file: " + err.Error())
-		}
-		defer file.Close()
-		logOutput = io.MultiWriter(os.Stdout, file)
 	}
-	log := slog.New(slog.NewJSONHandler(logOutput, &slog.HandlerOptions{Level: cfg.LogLevel})).With("app", "flixer-indexer")
 	slog.SetDefault(log)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -136,7 +142,7 @@ func run() error {
 	pipe := pipeline.New(client, store, probe.New(cfg.FFprobePath), tracker, queue, log)
 	pipe.TaskLocks = rdb
 	pipe.SubtitleDir = cfg.SubtitleDir
-	pipe.TaskLogs = tasklog.New(rdb)
+	pipe.TaskLogs = tasklog.NewWithFallback(taskFallback)
 	pipe.Themes = themes.NewFetcher(cfg.CachePath, cfg.FFmpegPath, cfg.UserAgent)
 	pipe.SetTrickplay(cfg.TrickplayEnabled, cfg.TrickplayDir, cfg.FFmpegPath, cfg.TrickplayInterval, cfg.TrickplayWidth)
 

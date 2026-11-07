@@ -49,9 +49,21 @@ func Scan(ctx context.Context, lib models.Library, emit Emit) error {
 
 // ScanBranch emits the item at path and everything beneath it, such as a series with its seasons and episodes.
 func ScanBranch(ctx context.Context, lib models.Library, path string, emit Emit) error {
+	return scanBranch(ctx, lib, path, emit, false)
+}
+
+// ScanFolderBranch also emits the container ancestors needed by a selected folder.
+func ScanFolderBranch(ctx context.Context, lib models.Library, path string, emit Emit) error {
+	return scanBranch(ctx, lib, path, emit, true)
+}
+
+func scanBranch(ctx context.Context, lib models.Library, path string, emit Emit, includeAncestors bool) error {
+	matched := false
 	found := false
+	directory := false
 	capture := func(w models.Work) error {
-		if !within(w.Item.Path, path) {
+		ancestor := includeAncestors && directory && (w.Item.Type == models.ItemSeries || w.Item.Type == models.ItemSeason || w.Item.Type == models.ItemAlbum) && within(path, w.Item.Path)
+		if !within(w.Item.Path, path) && !ancestor {
 			return nil
 		}
 		found = true
@@ -61,12 +73,21 @@ func ScanBranch(ctx context.Context, lib models.Library, path string, emit Emit)
 		if f.AbsolutePath == "" || !within(path, f.AbsolutePath) {
 			continue
 		}
+		matched = true
+		info, err := os.Stat(path)
+		if err != nil {
+			return fmt.Errorf("scan target %s unavailable: %w", path, err)
+		}
+		directory = info.IsDir()
 		s := &scan{ctx: ctx, lib: lib, folder: f, emit: capture, target: path}
 		if err := s.run(); err != nil {
 			return err
 		}
 	}
-	if !found {
+	if !matched {
+		return fmt.Errorf("path %s is outside library %s", path, lib.ID)
+	}
+	if !found && !(includeAncestors && directory) {
 		return fmt.Errorf("nothing found at %s in library %s", path, lib.ID)
 	}
 	return nil

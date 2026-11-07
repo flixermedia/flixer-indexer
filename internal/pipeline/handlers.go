@@ -71,7 +71,7 @@ func (p *Pipeline) handleScan(ctx context.Context, t *asynq.Task) error {
 		err = scanner.Scan(ctx, lib, emit)
 	} else {
 		for _, path := range req.Paths {
-			if err = scanner.ScanBranch(ctx, lib, path, emit); err != nil {
+			if err = scanner.ScanFolderBranch(ctx, lib, path, emit); err != nil {
 				break
 			}
 		}

@@ -90,7 +90,6 @@ type Config struct {
 	// LyricsDir holds downloaded lyrics as <track id>.lrc (DATA_DIR/cache/lyrics).
 	LyricsDir         string
 	PluginsPath       string
-	LogDir            string
 	FFprobePath       string
 	FFmpegPath        string
 	TrickplayEnabled  bool
@@ -249,10 +248,6 @@ func Load() (Config, error) {
 	if abs, err := filepath.Abs(pluginsPath); err == nil {
 		pluginsPath = abs
 	}
-	logDir := strings.TrimSpace(os.Getenv("LOG_DIR"))
-	if logDir == "" && dataPath != "" {
-		logDir = filepath.Join(dataPath, "logs")
-	}
 	flixerURL := envOrDefault("FLIXER_URL", envOrDefault("FLIXER_INTERNAL_URL", "http://localhost:8083"))
 	debounce, err := parseDuration("WATCH_DEBOUNCE", "30s")
 	if err != nil {
@@ -279,7 +274,6 @@ func Load() (Config, error) {
 		CachePath:         cachePath,
 		LyricsDir:         lyricsDir,
 		PluginsPath:       pluginsPath,
-		LogDir:            logDir,
 		FFprobePath:       ffprobe,
 		FFmpegPath:        envOrDefault("FFMPEG_PATH", "ffmpeg"),
 		TrickplayEnabled:  trickplayEnabled,
