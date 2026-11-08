@@ -3,3 +3,4 @@ cache/
 bin/
 *.exe
 stub-output.jsonl
+flixer-indexer
