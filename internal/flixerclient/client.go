@@ -25,6 +25,7 @@ const (
 	librariesPath       = "/api/indexer/libraries"
 	settingsPath        = "/api/indexer/settings"
 	itemsPath           = "/api/indexer/media/items"
+	manualMatchPath     = "/api/indexer/media/manual-match"
 	lyricsPath          = "/api/indexer/media/items/"
 	introSyncPath       = "/api/indexer/media/intro-sync"
 	introSavePath       = "/api/indexer/media/intro-segments"
@@ -35,6 +36,7 @@ const (
 type API interface {
 	Libraries(ctx context.Context) ([]models.Library, error)
 	Settings(ctx context.Context) (models.Settings, error)
+	ManualMatch(ctx context.Context, libraryID, itemType, path string) (map[string]string, error)
 	// UpsertItem creates or updates an item and returns flixer's id for it.
 	UpsertItem(ctx context.Context, item models.Item) (string, error)
 	// UpsertItemLyrics stores searchable lyrics for an indexed track.
@@ -129,6 +131,16 @@ func (c *Client) Settings(ctx context.Context) (models.Settings, error) {
 	var settings models.Settings
 	err := c.do(ctx, http.MethodGet, settingsPath, nil, &settings)
 	return settings, err
+}
+
+func (c *Client) ManualMatch(ctx context.Context, libraryID, itemType, path string) (map[string]string, error) {
+	var out struct {
+		ProviderIDs map[string]string `json:"providerIds"`
+	}
+	err := c.do(ctx, http.MethodPost, manualMatchPath, map[string]string{
+		"libraryId": libraryID, "type": itemType, "path": path,
+	}, &out)
+	return out.ProviderIDs, err
 }
 
 func (c *Client) UpsertItem(ctx context.Context, item models.Item) (string, error) {

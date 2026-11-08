@@ -379,7 +379,7 @@ func (r *Registry) prepare(q providers.Query) providers.Query {
 }
 
 func (r *Registry) cached(_ context.Context, kind string, q providers.Query, fn func() (*providers.Result, error)) (*providers.Result, error) {
-	key := fmt.Sprintf("%s|%s|%d|%s|%v|%s", kind, strings.ToLower(q.Title), q.Year, strings.ToLower(q.Artist), q.IDs, q.Language)
+	key := fmt.Sprintf("%s|%s|%d|%s|%v|%s|%t", kind, strings.ToLower(q.Title), q.Year, strings.ToLower(q.Artist), q.IDs, q.Language, q.RequireIDMatch)
 	res, err := r.cache.Do(key, fn)
 	if res == nil || err != nil {
 		return nil, err
@@ -407,6 +407,9 @@ func run[T providers.Provider](ctx context.Context, q providers.Query, list []T,
 		if res == nil {
 			continue
 		}
+		if q.RequireIDMatch && !matchingIDs(q.IDs, res.IDs) {
+			continue
+		}
 		merged = combine(merged, res)
 		q.IDs = providers.MergeIDs(q.IDs, res.IDs)
 		if q.Title == "" {
@@ -417,6 +420,20 @@ func run[T providers.Provider](ctx context.Context, q providers.Query, list []T,
 		return nil, failure
 	}
 	return merged, nil
+}
+
+func matchingIDs(expected, actual map[string]string) bool {
+	matched := false
+	for provider, want := range expected {
+		if want == "" || actual[provider] == "" {
+			continue
+		}
+		if actual[provider] != want {
+			return false
+		}
+		matched = true
+	}
+	return matched
 }
 
 func combine(dst, src *providers.Result) *providers.Result {

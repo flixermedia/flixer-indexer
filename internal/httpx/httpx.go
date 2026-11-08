@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -209,6 +210,17 @@ func retryAfter(resp *http.Response) time.Duration {
 	value := resp.Header.Get("Retry-After")
 	if seconds, err := strconv.Atoi(value); err == nil && seconds >= 0 {
 		return time.Duration(seconds) * time.Second
+	}
+	return 0
+}
+
+// ParseRetryAfter accepts a delay in seconds or an HTTP date.
+func ParseRetryAfter(value string, now time.Time) time.Duration {
+	if seconds, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64); err == nil && seconds > 0 {
+		return time.Duration(min(seconds, int64((7*24*time.Hour)/time.Second))) * time.Second
+	}
+	if date, err := http.ParseTime(value); err == nil && date.After(now) {
+		return min(date.Sub(now), 7*24*time.Hour)
 	}
 	return 0
 }

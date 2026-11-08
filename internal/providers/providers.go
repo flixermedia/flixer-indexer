@@ -19,6 +19,8 @@ type Query struct {
 	Language string            `json:"language,omitempty"`
 	// Artist is set for album lookups.
 	Artist string `json:"artist,omitempty"`
+	// RequireIDMatch prevents unverified title matches from contributing metadata.
+	RequireIDMatch bool `json:"-"`
 }
 
 // Result is what a provider knows about an item.

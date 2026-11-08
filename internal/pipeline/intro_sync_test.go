@@ -207,7 +207,6 @@ func TestIntroSyncRateLimitRetriesAfterOneHourWhenFallbackCannotProvideTimings(t
 	}{
 		{name: "timings not found", fallback: &fakeIntroDB{result: map[string]models.IntroTimeRange{}}, enabled: true},
 		{name: "fallback unavailable", enabled: false},
-		{name: "fallback failed", fallback: &fakeIntroDB{err: errors.New("fallback unavailable")}, enabled: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -226,8 +225,8 @@ func TestIntroSyncRateLimitRetriesAfterOneHourWhenFallbackCannotProvideTimings(t
 			if err == nil {
 				t.Fatal("expected a delayed retry error")
 			}
-			if got := retryDelay(0, err, asynq.NewTask(TypeIntroMovie, payload)); got != time.Hour {
-				t.Fatalf("retry delay = %s, want %s", got, time.Hour)
+			if got := retryDelay(0, err, asynq.NewTask(TypeIntroMovie, payload)); !errors.Is(err, errIntroDeferred) || got < time.Hour || got > time.Hour+5*time.Minute {
+				t.Fatalf("retry delay = %s, error = %v", got, err)
 			}
 		})
 	}
@@ -248,7 +247,19 @@ func TestIntroSyncIntroDBRateLimitRetriesAfterOneHour(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected a delayed retry error")
 	}
-	if got := retryDelay(0, err, asynq.NewTask(TypeIntroMovie, payload)); got != time.Hour {
-		t.Fatalf("retry delay = %s, want %s", got, time.Hour)
+	if got := retryDelay(0, err, asynq.NewTask(TypeIntroMovie, payload)); !errors.Is(err, errIntroDeferred) || got < time.Hour || got > time.Hour+5*time.Minute {
+		t.Fatalf("retry delay = %s, error = %v", got, err)
+	}
+}
+
+func TestIntroSyncDoesNotHideFallbackFailureDuringRateLimit(t *testing.T) {
+	p := New(&fakeAPI{}, nil, nil, nil, nil, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	p.IntroDB = &fakeIntroDB{err: theintrodb.ErrRateLimited}
+	p.IntroDBFallback = &fakeIntroDB{err: errors.New("fallback unavailable")}
+	p.SetIntroDBEnabled(true)
+	payload, _ := json.Marshal(models.IntroSyncCandidate{ID: "movie-id", Type: models.ItemMovie, ProviderIDs: map[string]string{"imdb": "tt0111161"}})
+	err := p.handleIntroMovie(context.Background(), asynq.NewTask(TypeIntroMovie, payload))
+	if err == nil || errors.Is(err, errIntroDeferred) || !strings.Contains(err.Error(), "fallback unavailable") {
+		t.Fatalf("error = %v", err)
 	}
 }

@@ -214,6 +214,7 @@ type Item struct {
 	Path         string   `json:"path"`
 	UpdateFields []string `json:"updateFields,omitempty"`
 	ParentPath   string   `json:"parentPath,omitempty"`
+	SeriesPath   string   `json:"seriesPath,omitempty"`
 	// ExternalKey is a rename-proof identity (e.g. "tmdb:1234:s1:e2"), or
 	// "path:<path>" when the item is unidentified. ParentExternalKey names the
 	// parent the same way; ParentProviderIDs lets flixer match a series whose
@@ -258,8 +259,12 @@ type Work struct {
 	Priority bool `json:"priority,omitempty"`
 	// NFOComplete means local metadata is enough to skip remote lookups.
 	NFOComplete bool `json:"nfoComplete,omitempty"`
+	// ManualMatch requires metadata to be resolved using the administrator's provider IDs.
+	ManualMatch bool `json:"manualMatch,omitempty"`
 	// Untracked work (single-item refreshes) does not count toward scan progress.
 	Untracked bool `json:"untracked,omitempty"`
+	// ScanID associates work with the scan that queued it.
+	ScanID string `json:"scanId,omitempty"`
 }
 
 // ScanRequest starts a scan of a library, optionally limited to filesystem paths.

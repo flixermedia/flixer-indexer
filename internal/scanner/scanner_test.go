@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -83,6 +84,7 @@ func TestShows(t *testing.T) {
 	if count(ws, models.ItemSeries) != 1 || count(ws, models.ItemSeason) != 2 || count(ws, models.ItemEpisode) != 3 {
 		t.Fatalf("unexpected items: %d", len(ws))
 	}
+
 	for _, w := range ws {
 		if w.Item.Type == models.ItemEpisode && (w.Hints.SeriesTitle != "Show" || w.Item.SeasonNumber == nil) {
 			t.Errorf("episode = %+v", w)
@@ -97,6 +99,30 @@ func TestShows(t *testing.T) {
 			if w.Item.ParentPath != want {
 				t.Errorf("episode parent = %q, want %q", w.Item.ParentPath, want)
 			}
+		}
+	}
+}
+
+func TestScanReportsDirectoryFailure(t *testing.T) {
+	root := t.TempDir()
+	touch(t, root, "Show/Season 1/Show S01E01.mkv")
+	show := filepath.Join(root, "Show")
+	err := Scan(context.Background(), lib(models.LibraryTVShows, root), func(w models.Work) error {
+		if w.Item.Type == models.ItemSeries {
+			return os.Rename(show, filepath.Join(root, "moved"))
+		}
+		return nil
+	})
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected read failure after folder disappeared, got %v", err)
+	}
+}
+
+func TestScanRejectsUnresolvedFolders(t *testing.T) {
+	for _, folders := range [][]models.Folder{nil, {{RootID: "missing"}}} {
+		err := Scan(context.Background(), models.Library{ID: "lib", Type: models.LibraryMovies, Folders: folders}, func(models.Work) error { return nil })
+		if err == nil {
+			t.Fatal("expected unresolved library to fail")
 		}
 	}
 }

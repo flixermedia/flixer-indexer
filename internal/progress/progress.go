@@ -4,6 +4,7 @@ package progress
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"time"
 
@@ -40,86 +41,119 @@ func New(rdb redis.UniversalClient) *Tracker { return &Tracker{rdb: rdb} }
 func key(libraryID string) string { return "indexer:scan:" + libraryID }
 
 // Start resets the counters for a new scan.
-func (t *Tracker) Start(ctx context.Context, libraryID string) error {
-	pipe := t.rdb.TxPipeline()
-	pipe.Del(ctx, key(libraryID))
-	pipe.HSet(ctx, key(libraryID), "state", StateScanning, "startedAt", time.Now().UTC().Format(time.RFC3339Nano),
-		"discovered", 0, "done", 0, "failed", 0)
-	pipe.Expire(ctx, key(libraryID), ttl)
-	_, err := pipe.Exec(ctx)
-	return err
-}
-
-func (t *Tracker) Discovered(ctx context.Context, libraryID string) error {
-	return t.rdb.HIncrBy(ctx, key(libraryID), "discovered", 1).Err()
-}
-
-func (t *Tracker) Done(ctx context.Context, libraryID string) error {
-	return t.finish(ctx, libraryID, "done")
-}
-
-func (t *Tracker) Failed(ctx context.Context, libraryID string) error {
-	return t.finish(ctx, libraryID, "failed")
-}
-
-func (t *Tracker) finish(ctx context.Context, libraryID, field string) error {
-	if err := t.rdb.HIncrBy(ctx, key(libraryID), field, 1).Err(); err != nil {
+func (t *Tracker) Start(ctx context.Context, libraryID, scanID string, canPrune bool) error {
+	const script = `
+		if redis.call("HGET", KEYS[1], "pruning") == "1" then return 0 end
+		redis.call("DEL", KEYS[1])
+		redis.call("HSET", KEYS[1], "state", "scanning", "startedAt", ARGV[2],
+		  "scanId", ARGV[1], "canPrune", ARGV[3], "discovered", 0, "done", 0, "failed", 0)
+		redis.call("EXPIRE", KEYS[1], ARGV[4])
+		return 1`
+	allowed := "0"
+	if canPrune {
+		allowed = "1"
+	}
+	result, err := t.rdb.Eval(ctx, script, []string{key(libraryID)}, scanID,
+		time.Now().UTC().Format(time.RFC3339Nano), allowed, int(ttl.Seconds())).Int()
+	if err != nil {
 		return err
 	}
-	return t.settle(ctx, libraryID)
+	if result == 0 {
+		return errors.New("library cleanup is still running")
+	}
+	return nil
+}
+
+func (t *Tracker) Discovered(ctx context.Context, libraryID, scanID string) error {
+	const script = `if redis.call("HGET", KEYS[1], "scanId") == ARGV[1] then return redis.call("HINCRBY", KEYS[1], "discovered", 1) end return 0`
+	return t.rdb.Eval(ctx, script, []string{key(libraryID)}, scanID).Err()
+}
+
+func (t *Tracker) Done(ctx context.Context, libraryID, scanID, itemID string) error {
+	return t.finish(ctx, libraryID, scanID, itemID, "done")
+}
+
+func (t *Tracker) Failed(ctx context.Context, libraryID, scanID, itemID string) error {
+	return t.finish(ctx, libraryID, scanID, itemID, "failed")
+}
+
+const settleScript = `
+	if redis.call("HGET", KEYS[1], "state") == "indexing" and
+	   redis.call("HGET", KEYS[1], "walked") == "1" and
+	   tonumber(redis.call("HGET", KEYS[1], "done") or "0") + tonumber(redis.call("HGET", KEYS[1], "failed") or "0") >= tonumber(redis.call("HGET", KEYS[1], "discovered") or "0") then
+		redis.call("HSET", KEYS[1], "state", "complete", "finishedAt", ARGV[2])
+	end`
+
+func (t *Tracker) finish(ctx context.Context, libraryID, scanID, itemID, field string) error {
+	if scanID == "" || itemID == "" {
+		return nil
+	}
+	const script = `
+		if redis.call("HGET", KEYS[1], "scanId") ~= ARGV[1] then return 0 end
+		if redis.call("HSETNX", KEYS[1], "item:" .. ARGV[3], ARGV[4]) == 1 then
+			redis.call("HINCRBY", KEYS[1], ARGV[4], 1)
+		end
+	` + settleScript + `
+		return 1`
+	return t.rdb.Eval(ctx, script, []string{key(libraryID)}, scanID,
+		time.Now().UTC().Format(time.RFC3339), itemID, field).Err()
 }
 
 // WalkDone marks that the filesystem walk finished and no more items will be
 // discovered.
-func (t *Tracker) WalkDone(ctx context.Context, libraryID string) error {
-	if err := t.rdb.HSet(ctx, key(libraryID), "state", StateIndexing, "walked", 1).Err(); err != nil {
-		return err
-	}
-	return t.settle(ctx, libraryID)
+func (t *Tracker) WalkDone(ctx context.Context, libraryID, scanID string) error {
+	const script = `
+		if redis.call("HGET", KEYS[1], "scanId") ~= ARGV[1] then return 0 end
+		redis.call("HSET", KEYS[1], "state", "indexing", "walked", 1)
+	` + settleScript + `
+		return 1`
+	return t.rdb.Eval(ctx, script, []string{key(libraryID)}, scanID, time.Now().UTC().Format(time.RFC3339)).Err()
 }
 
 // WalkFailed ends a scan whose walk could not complete.
-func (t *Tracker) WalkFailed(ctx context.Context, libraryID string, cause error) error {
-	return t.rdb.HSet(ctx, key(libraryID), "state", StateFailed, "error", cause.Error(),
-		"finishedAt", time.Now().UTC().Format(time.RFC3339)).Err()
-}
-
-func (t *Tracker) settle(ctx context.Context, libraryID string) error {
-	s, err := t.Get(ctx, libraryID)
-	if err != nil || s == nil {
-		return err
-	}
-	vals, err := t.rdb.HMGet(ctx, key(libraryID), "walked").Result()
-	if err != nil {
-		return err
-	}
-	walked := len(vals) > 0 && vals[0] != nil
-	if walked && s.State == StateIndexing && s.Done+s.Failed >= s.Discovered {
-		return t.rdb.HSet(ctx, key(libraryID), "state", StateComplete, "finishedAt", time.Now().UTC().Format(time.RFC3339)).Err()
-	}
-	return nil
+func (t *Tracker) WalkFailed(ctx context.Context, libraryID, scanID string, cause error) error {
+	const script = `if redis.call("HGET", KEYS[1], "scanId") == ARGV[1] then
+		return redis.call("HSET", KEYS[1], "state", "failed", "error", ARGV[2], "finishedAt", ARGV[3]) end return 0`
+	return t.rdb.Eval(ctx, script, []string{key(libraryID)}, scanID, cause.Error(), time.Now().UTC().Format(time.RFC3339)).Err()
 }
 
 // ClaimPrune reports whether the caller should prune the library now: the scan
 // finished cleanly and no one has pruned for it yet. It returns the scan's start
 // time, so only items older than the scan are removed.
-func (t *Tracker) ClaimPrune(ctx context.Context, libraryID string) (string, bool, error) {
-	s, err := t.Get(ctx, libraryID)
-	if err != nil || s == nil || s.State != StateComplete || s.Failed > 0 || s.StartedAt == "" {
-		return "", false, err
+func (t *Tracker) ClaimPrune(ctx context.Context, libraryID, scanID string) (string, bool, error) {
+	if scanID == "" {
+		return "", false, nil
 	}
-	claimed, err := t.rdb.HSetNX(ctx, key(libraryID), "pruned", 1).Result()
-	if err != nil || !claimed {
-		return "", false, err
-	}
-	return s.StartedAt, true, nil
+	const script = `
+		if redis.call("HGET", KEYS[1], "scanId") ~= ARGV[1] or
+		   redis.call("HGET", KEYS[1], "state") ~= "complete" or
+		   redis.call("HGET", KEYS[1], "canPrune") ~= "1" or
+		   tonumber(redis.call("HGET", KEYS[1], "discovered") or "0") == 0 or
+		   redis.call("HGET", KEYS[1], "failed") ~= "0" or
+		   redis.call("HGET", KEYS[1], "pruned") then return "" end
+		redis.call("HSET", KEYS[1], "pruned", 1, "pruning", 1)
+		return redis.call("HGET", KEYS[1], "startedAt") or ""`
+	started, err := t.rdb.Eval(ctx, script, []string{key(libraryID)}, scanID).Text()
+	return started, started != "", err
+}
+
+func (t *Tracker) FinishPrune(ctx context.Context, libraryID, scanID string) error {
+	const script = `if redis.call("HGET", KEYS[1], "scanId") == ARGV[1] then return redis.call("HDEL", KEYS[1], "pruning") end return 0`
+	return t.rdb.Eval(ctx, script, []string{key(libraryID)}, scanID).Err()
 }
 
 // Get returns the latest scan for a library, or nil if there is none.
 func (t *Tracker) Get(ctx context.Context, libraryID string) (*Scan, error) {
-	m, err := t.rdb.HGetAll(ctx, key(libraryID)).Result()
-	if err != nil || len(m) == 0 {
+	fields := []string{"state", "discovered", "done", "failed", "startedAt", "finishedAt", "error"}
+	vals, err := t.rdb.HMGet(ctx, key(libraryID), fields...).Result()
+	if err != nil || vals[0] == nil {
 		return nil, err
+	}
+	m := make(map[string]string, len(fields))
+	for i, value := range vals {
+		if text, ok := value.(string); ok {
+			m[fields[i]] = text
+		}
 	}
 	num := func(k string) int64 { n, _ := strconv.ParseInt(m[k], 10, 64); return n }
 	return &Scan{

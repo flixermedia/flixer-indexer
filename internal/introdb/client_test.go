@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/flixermedia/flixer-indexer/internal/models"
 )
@@ -75,6 +76,7 @@ func TestGetMediaReturnsErrorForFailedRequest(t *testing.T) {
 
 func TestGetMediaReportsRateLimit(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "120")
 		http.Error(w, "rate limited", http.StatusTooManyRequests)
 	}))
 	defer server.Close()
@@ -84,5 +86,9 @@ func TestGetMediaReportsRateLimit(t *testing.T) {
 	})
 	if !errors.Is(err, ErrRateLimited) {
 		t.Fatalf("error = %v, want rate-limit error", err)
+	}
+	var limited *RateLimitError
+	if !errors.As(err, &limited) || limited.RetryAfter != 2*time.Minute {
+		t.Fatalf("error = %v, want 2 minute retry delay", err)
 	}
 }

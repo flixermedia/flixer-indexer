@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/flixermedia/flixer-indexer/internal/httpx"
 	"github.com/flixermedia/flixer-indexer/internal/models"
 )
 
@@ -22,6 +23,11 @@ const defaultBaseURL = "https://api.introdb.app"
 var imdbIDPattern = regexp.MustCompile(`^tt[0-9]{7,8}$`)
 
 var ErrRateLimited = errors.New("IntroDB rate limited the request")
+
+type RateLimitError struct{ RetryAfter time.Duration }
+
+func (e *RateLimitError) Error() string { return ErrRateLimited.Error() }
+func (e *RateLimitError) Unwrap() error { return ErrRateLimited }
 
 type Client struct {
 	baseURL string
@@ -85,7 +91,7 @@ func (c *Client) GetMedia(ctx context.Context, item models.IntroSyncCandidate) (
 	}
 	if response.StatusCode < 200 || response.StatusCode > 299 {
 		if response.StatusCode == http.StatusTooManyRequests {
-			return nil, fmt.Errorf("%w: returned status %d", ErrRateLimited, response.StatusCode)
+			return nil, &RateLimitError{RetryAfter: httpx.ParseRetryAfter(response.Header.Get("Retry-After"), time.Now())}
 		}
 		return nil, fmt.Errorf("IntroDB returned status %d", response.StatusCode)
 	}

@@ -84,6 +84,7 @@ func (p *Pool) SetConcurrency(queue string, n int) error {
 		Logger:          slogAdapter{p.log.With("component", "asynq", "queue", queue)},
 		LogLevel:        asynq.WarnLevel,
 		RetryDelayFunc:  retryDelay,
+		IsFailure:       func(err error) bool { return !errors.Is(err, errIntroDeferred) },
 	})
 	mux := asynq.NewServeMux()
 	for typ, h := range handlers {

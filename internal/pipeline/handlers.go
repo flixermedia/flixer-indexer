@@ -44,13 +44,18 @@ func (p *Pipeline) handleScan(ctx context.Context, t *asynq.Task) error {
 	}
 	fullLibraryScan := len(req.Paths) == 0
 	tracked := req.TrackProgress || (fullLibraryScan && len(req.Jobs) == 0 && !req.TrickplayOnly)
+	scanID := ""
 	if tracked {
-		if err := p.Progress.Start(ctx, lib.ID); err != nil {
+		scanID, err = newTaskLockToken()
+		if err != nil {
 			return err
+		}
+		if err := p.Progress.Start(ctx, lib.ID, scanID, fullLibraryScan && len(req.Jobs) == 0 && !req.TrickplayOnly); err != nil {
+			return fmt.Errorf("start scan progress: %w", err)
 		}
 	}
 	if req.TrickplayOnly {
-		return p.handleTrickplayScan(ctx, lib, req.TrackProgress)
+		return p.handleTrickplayScan(ctx, lib, scanID)
 	}
 	p.logger(ctx).Info("scan started", "library", lib.ID, "name", lib.Name, "type", lib.Type)
 
@@ -58,12 +63,13 @@ func (p *Pipeline) handleScan(ctx context.Context, t *asynq.Task) error {
 		w.Force = req.Force
 		w.Jobs = req.Jobs
 		w.Untracked = (len(req.Jobs) > 0 || !fullLibraryScan) && !req.TrackProgress
+		w.ScanID = scanID
 		queued, err := p.Enqueue(ctx, config.QueueIdentify, TypeIdentify, w, maxRetry)
 		if err != nil {
 			return err
 		}
 		if queued && tracked {
-			return p.Progress.Discovered(ctx, lib.ID)
+			return p.Progress.Discovered(ctx, lib.ID, scanID)
 		}
 		return nil
 	}
@@ -78,27 +84,35 @@ func (p *Pipeline) handleScan(ctx context.Context, t *asynq.Task) error {
 	}
 	if err != nil {
 		if tracked {
-			_ = p.Progress.WalkFailed(context.WithoutCancel(ctx), lib.ID, err)
+			if progressErr := p.Progress.WalkFailed(context.WithoutCancel(ctx), lib.ID, scanID, err); progressErr != nil {
+				p.Log.Error("could not record scan failure", "library", lib.ID, "error", progressErr)
+			}
 		}
 		return fmt.Errorf("scan %s: %w: %w", lib.ID, err, asynq.SkipRetry)
 	}
 	p.logger(ctx).Info("scan walk finished", "library", lib.ID)
 	if len(req.Jobs) > 0 {
 		if req.TrackProgress {
-			return p.Progress.WalkDone(ctx, lib.ID)
+			return p.Progress.WalkDone(ctx, lib.ID, scanID)
 		}
 		return nil
 	}
 	if !tracked {
 		return nil
 	}
-	if err := p.Progress.WalkDone(ctx, lib.ID); err != nil {
+	if err := p.Progress.WalkDone(ctx, lib.ID, scanID); err != nil {
 		return err
 	}
 	// Targeted scans must not prune items outside the paths they visited.
 	if fullLibraryScan {
-		// An empty walk completes immediately, with no item left to trigger the prune.
-		p.pruneIfComplete(ctx, lib.ID)
+		status, err := p.Progress.Get(ctx, lib.ID)
+		if err != nil {
+			return fmt.Errorf("read scan progress: %w", err)
+		}
+		if status != nil && status.Discovered == 0 {
+			p.logger(ctx).Warn("skipping cleanup for an empty scan", "library", lib.ID)
+		}
+		p.pruneIfComplete(ctx, lib.ID, scanID)
 	}
 	return nil
 }
@@ -171,7 +185,7 @@ func hasJob(w models.Work, jobs ...string) bool {
 }
 
 // handleRefresh re-describes a single path and runs it through the pipeline.
-func (p *Pipeline) handleTrickplayScan(ctx context.Context, lib models.Library, trackProgress bool) error {
+func (p *Pipeline) handleTrickplayScan(ctx context.Context, lib models.Library, scanID string) error {
 	p.logger(ctx).Info("trickplay backfill started", "library", lib.ID, "name", lib.Name)
 	err := scanner.Scan(ctx, lib, func(w models.Work) error {
 		item := w.Item
@@ -180,7 +194,7 @@ func (p *Pipeline) handleTrickplayScan(ctx context.Context, lib models.Library, 
 		}
 		task := trickplay.Task{
 			LibraryID: item.LibraryID, Path: item.Path, RootID: item.RootID,
-			RelativePath: item.RelativePath, TrackProgress: trackProgress,
+			RelativePath: item.RelativePath, TrackProgress: scanID != "", ScanID: scanID,
 		}
 		if p.Trickplay == nil {
 			return errors.New("trickplay generator is unavailable")
@@ -195,24 +209,26 @@ func (p *Pipeline) handleTrickplayScan(ctx context.Context, lib models.Library, 
 		queued, err := p.Enqueue(ctx, config.QueueTrickplay, TypeTrickplay, task, 1)
 		if err != nil {
 			p.logger(ctx).Warn("could not queue trickplay during backfill", "library", lib.ID, "error", err)
-			if trackProgress {
+			if scanID != "" {
 				return err
 			}
 			return nil
 		}
-		if queued && trackProgress {
-			return p.Progress.Discovered(ctx, lib.ID)
+		if queued && scanID != "" {
+			return p.Progress.Discovered(ctx, lib.ID, scanID)
 		}
 		return nil
 	})
 	if err != nil {
-		if trackProgress {
-			_ = p.Progress.WalkFailed(context.WithoutCancel(ctx), lib.ID, err)
+		if scanID != "" {
+			if progressErr := p.Progress.WalkFailed(context.WithoutCancel(ctx), lib.ID, scanID, err); progressErr != nil {
+				p.Log.Error("could not record scan failure", "library", lib.ID, "error", progressErr)
+			}
 		}
 		return err
 	}
-	if trackProgress {
-		return p.Progress.WalkDone(ctx, lib.ID)
+	if scanID != "" {
+		return p.Progress.WalkDone(ctx, lib.ID, scanID)
 	}
 	return nil
 }
@@ -234,7 +250,7 @@ func (p *Pipeline) handleTrickplay(ctx context.Context, t *asynq.Task) error {
 		return err
 	}
 	if task.TrackProgress {
-		return p.Progress.Done(ctx, task.LibraryID)
+		return p.Progress.Done(ctx, task.LibraryID, task.ScanID, progressItemID("trickplay", task.Path))
 	}
 	return nil
 }
@@ -335,20 +351,46 @@ func (p *Pipeline) handleIdentify(ctx context.Context, t *asynq.Task) error {
 	item := &w.Item
 
 	if len(w.Jobs) == 0 || hasJob(w, "images", "descriptions", "lyrics") {
+		manualIDs, err := p.Client.ManualMatch(ctx, item.LibraryID, item.Type, item.Path)
+		if err != nil {
+			return fmt.Errorf("load manual match: %w", err)
+		}
+		if len(manualIDs) > 0 {
+			item.ProviderIDs = manualIDs
+			w.Force = true
+			w.ManualMatch = true
+		}
+		var seriesManualIDs map[string]string
+		if (item.Type == models.ItemSeason || item.Type == models.ItemEpisode) && w.Hints.SeriesPath != "" {
+			seriesManualIDs, err = p.Client.ManualMatch(ctx, item.LibraryID, models.ItemSeries, w.Hints.SeriesPath)
+			if err != nil {
+				return fmt.Errorf("load series manual match: %w", err)
+			}
+			if len(seriesManualIDs) > 0 {
+				w.Hints.SeriesIDs = seriesManualIDs
+				w.Force = true
+				w.ManualMatch = true
+				if len(manualIDs) == 0 {
+					item.ProviderIDs = nil
+				}
+			}
+		}
 		if path := nfoPath(*item, root); path != "" {
 			data, err := nfo.Read(path)
 			if err != nil {
 				p.logger(ctx).Warn("unreadable nfo", "path", path, "error", err)
 			} else {
 				item.NFOPresent = true
-				item.Metadata = data.Metadata
-				item.ProviderIDs = providers.MergeIDs(item.ProviderIDs, data.IDs)
-				w.NFOComplete = data.Complete()
+				if len(manualIDs) == 0 && len(seriesManualIDs) == 0 {
+					item.Metadata = data.Metadata
+					item.ProviderIDs = providers.MergeIDs(item.ProviderIDs, data.IDs)
+					w.NFOComplete = data.Complete()
+				}
 			}
 		}
 		if item.Type == models.ItemSeason || item.Type == models.ItemEpisode {
 			if path := filepath.Join(w.Hints.SeriesPath, "tvshow.nfo"); w.Hints.SeriesPath != "" {
-				if data, err := nfo.Read(path); err == nil {
+				if data, err := nfo.Read(path); err == nil && len(seriesManualIDs) == 0 {
 					w.Hints.SeriesIDs = providers.MergeIDs(w.Hints.SeriesIDs, data.IDs)
 				}
 			}
@@ -458,6 +500,8 @@ func (p *Pipeline) handleMetadata(ctx context.Context, t *asynq.Task) error {
 				if err := p.lookup(ctx, reg, &w); err != nil {
 					return err
 				}
+			} else if w.ManualMatch {
+				return fmt.Errorf("cannot resolve a manual match: no metadata provider is configured")
 			}
 		}
 	}
@@ -487,7 +531,7 @@ func needsProviderArtwork(item models.Item) bool {
 
 func (p *Pipeline) lookup(ctx context.Context, reg *registry.Registry, w *models.Work) error {
 	item, h := &w.Item, w.Hints
-	query := providers.Query{Title: firstNonEmpty(item.Metadata.Title, h.Title), Year: firstNonZero(item.Metadata.Year, h.Year), IDs: item.ProviderIDs}
+	query := providers.Query{Title: firstNonEmpty(item.Metadata.Title, h.Title), Year: firstNonZero(item.Metadata.Year, h.Year), IDs: item.ProviderIDs, RequireIDMatch: w.ManualMatch}
 
 	var res *providers.Result
 	var err error
@@ -501,7 +545,7 @@ func (p *Pipeline) lookup(ctx context.Context, reg *registry.Registry, w *models
 		query.Artist = h.Artist
 		res, err = reg.Album(ctx, query)
 	case models.ItemSeason, models.ItemEpisode:
-		ids, serr := p.seriesIDs(ctx, reg, h)
+		ids, serr := p.seriesIDs(ctx, reg, h, w.ManualMatch)
 		if serr != nil {
 			return serr
 		}
@@ -521,6 +565,9 @@ func (p *Pipeline) lookup(ctx context.Context, reg *registry.Registry, w *models
 		return err
 	}
 	if res == nil {
+		if w.ManualMatch && (item.Type == models.ItemMovie || item.Type == models.ItemSeries || item.Type == models.ItemAlbum) {
+			return fmt.Errorf("no metadata found for manual match of %s", item.Path)
+		}
 		return nil
 	}
 	item.ProviderIDs = providers.MergeIDs(item.ProviderIDs, res.IDs)
@@ -535,14 +582,20 @@ func (p *Pipeline) lookup(ctx context.Context, reg *registry.Registry, w *models
 
 // seriesIDs resolves a series' provider ids for its seasons and episodes.
 // Lookups are cached by the registry, so repeating this per episode is cheap.
-func (p *Pipeline) seriesIDs(ctx context.Context, reg *registry.Registry, h models.Hints) (map[string]string, error) {
+func (p *Pipeline) seriesIDs(ctx context.Context, reg *registry.Registry, h models.Hints, requireIDMatch bool) (map[string]string, error) {
 	ids := providers.MergeIDs(nil, h.SeriesIDs)
 	if h.SeriesTitle == "" && len(ids) == 0 {
+		if requireIDMatch {
+			return nil, fmt.Errorf("no provider IDs found for manual series match of %s", h.SeriesPath)
+		}
 		return ids, nil
 	}
-	res, err := reg.Series(ctx, providers.Query{Title: h.SeriesTitle, Year: h.SeriesYear, IDs: ids})
+	res, err := reg.Series(ctx, providers.Query{Title: h.SeriesTitle, Year: h.SeriesYear, IDs: ids, RequireIDMatch: requireIDMatch})
 	if err != nil {
 		return nil, err
+	}
+	if res == nil && requireIDMatch {
+		return nil, fmt.Errorf("no metadata found for manual series match of %s", h.SeriesPath)
 	}
 	if res != nil {
 		ids = providers.MergeIDs(ids, res.IDs)
@@ -701,7 +754,7 @@ func (p *Pipeline) handleProbe(ctx context.Context, t *asynq.Task) error {
 	}
 	if len(w.Jobs) > 0 {
 		if !w.Untracked {
-			return p.Progress.Done(ctx, item.LibraryID)
+			return p.Progress.Done(ctx, item.LibraryID, w.ScanID, progressItemID(item.Type, item.Path))
 		}
 		return nil
 	}
@@ -717,10 +770,10 @@ func (p *Pipeline) handleProbe(ctx context.Context, t *asynq.Task) error {
 	p.queueTheme(ctx, *item)
 	p.queueIntroSync(ctx, *item, id)
 	if !w.Untracked {
-		if err := p.Progress.Done(ctx, item.LibraryID); err != nil {
+		if err := p.Progress.Done(ctx, item.LibraryID, w.ScanID, progressItemID(item.Type, item.Path)); err != nil {
 			return err
 		}
-		p.pruneIfComplete(ctx, item.LibraryID)
+		p.pruneIfComplete(ctx, item.LibraryID, w.ScanID)
 	}
 	return nil
 }
@@ -729,8 +782,8 @@ func (p *Pipeline) handleProbe(ctx context.Context, t *asynq.Task) error {
 // moved (another library folder) or disappeared does not linger. It only runs
 // once per scan, and never for a scan with failures, since an item that failed
 // to index would look missing.
-func (p *Pipeline) pruneIfComplete(ctx context.Context, libraryID string) {
-	startedAt, ok, err := p.Progress.ClaimPrune(ctx, libraryID)
+func (p *Pipeline) pruneIfComplete(ctx context.Context, libraryID, scanID string) {
+	startedAt, ok, err := p.Progress.ClaimPrune(ctx, libraryID, scanID)
 	if err != nil || !ok {
 		if err != nil {
 			p.logger(ctx).Warn("prune check failed", "library", libraryID, "error", err)
@@ -740,9 +793,12 @@ func (p *Pipeline) pruneIfComplete(ctx context.Context, libraryID string) {
 	removed, err := p.Client.PruneLibrary(context.WithoutCancel(ctx), libraryID, startedAt)
 	if err != nil {
 		p.logger(ctx).Warn("prune failed", "library", libraryID, "error", err)
-		return
+	} else {
+		p.logger(ctx).Info("scan pruned", "library", libraryID, "removed", removed)
 	}
-	p.logger(ctx).Info("scan pruned", "library", libraryID, "removed", removed)
+	if err := p.Progress.FinishPrune(context.WithoutCancel(ctx), libraryID, scanID); err != nil {
+		p.logger(ctx).Error("could not release scan cleanup", "library", libraryID, "error", err)
+	}
 }
 
 // finalize fills anything still empty from what the filesystem told us.
@@ -764,6 +820,9 @@ func finalize(w *models.Work, root string) {
 		w.Item.Images = []models.Image{}
 	}
 	models.AssignKeys(&w.Item, h.SeriesIDs, root)
+	if w.Item.Type == models.ItemSeason || w.Item.Type == models.ItemEpisode {
+		w.Item.SeriesPath = h.SeriesPath
+	}
 	if m.Artist == "" {
 		m.Artist = h.Artist
 	}

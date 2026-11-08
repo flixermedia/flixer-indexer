@@ -91,6 +91,26 @@ func TestUpsertItem(t *testing.T) {
 	}
 }
 
+func TestManualMatch(t *testing.T) {
+	c := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != manualMatchPath {
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+		}
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body["libraryId"] != "lib" || body["type"] != "series" || body["path"] != "/tv/A" {
+			t.Fatalf("body = %v", body)
+		}
+		_, _ = w.Write([]byte(`{"providerIds":{"tmdb":"123"}}`))
+	})
+	ids, err := c.ManualMatch(context.Background(), "lib", "series", "/tv/A")
+	if err != nil || ids["tmdb"] != "123" {
+		t.Fatalf("ids = %v, %v", ids, err)
+	}
+}
+
 func TestUpsertItemLyrics(t *testing.T) {
 	c := serve(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != lyricsPath+"track-1/lyrics" {

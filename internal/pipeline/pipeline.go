@@ -266,6 +266,19 @@ func newTaskLockToken() (string, error) {
 
 func taskItemLockKey(typ string, payload []byte) string {
 	libraryID, itemType, path := TaskSubject(typ, payload)
+	scanID := ""
+	switch typ {
+	case TypeIdentify, TypeMetadata, TypeImages, TypeProbe:
+		var work models.Work
+		if json.Unmarshal(payload, &work) == nil {
+			scanID = work.ScanID
+		}
+	case TypeTrickplay:
+		var task trickplay.Task
+		if json.Unmarshal(payload, &task) == nil {
+			scanID = task.ScanID
+		}
+	}
 	if typ == TypeScan {
 		var request models.ScanRequest
 		if json.Unmarshal(payload, &request) == nil {
@@ -311,8 +324,13 @@ func taskItemLockKey(typ string, payload []byte) string {
 	if libraryID != "intro" {
 		path = filepath.Clean(path)
 	}
-	sum := sha256.Sum256([]byte(typ + "\x00" + libraryID + "\x00" + itemType + "\x00" + path))
+	sum := sha256.Sum256([]byte(typ + "\x00" + libraryID + "\x00" + itemType + "\x00" + path + "\x00" + scanID))
 	return "flixer:indexer:item-task:" + hex.EncodeToString(sum[:])
+}
+
+func progressItemID(itemType, path string) string {
+	sum := sha256.Sum256([]byte(itemType + "\x00" + filepath.Clean(path)))
+	return hex.EncodeToString(sum[:])
 }
 
 func (p *Pipeline) releaseTaskLock(key, token string) {
@@ -437,6 +455,9 @@ func (p *Pipeline) handlers() map[string]map[string]asynq.HandlerFunc {
 // OnError is the Asynq error handler. When a task has used up its retries the
 // item counts as failed in its scan's progress.
 func (p *Pipeline) OnError(ctx context.Context, task *asynq.Task, err error) {
+	if errors.Is(err, errIntroDeferred) {
+		return
+	}
 	retried, _ := asynq.GetRetryCount(ctx)
 	limit, _ := asynq.GetMaxRetry(ctx)
 	terminal := retried >= limit || errors.Is(err, asynq.SkipRetry)
@@ -451,13 +472,18 @@ func (p *Pipeline) OnError(ctx context.Context, task *asynq.Task, err error) {
 	if task.Type() == TypeTrickplay {
 		var trickplayTask trickplay.Task
 		if json.Unmarshal(task.Payload(), &trickplayTask) == nil && trickplayTask.TrackProgress {
-			_ = p.Progress.Failed(context.WithoutCancel(ctx), trickplayTask.LibraryID)
+			if progressErr := p.Progress.Failed(context.WithoutCancel(ctx), trickplayTask.LibraryID, trickplayTask.ScanID, progressItemID("trickplay", trickplayTask.Path)); progressErr != nil {
+				p.Log.Error("could not record task failure", "error", progressErr)
+			}
 		}
 		return
 	}
 	var w models.Work
-	if json.Unmarshal(task.Payload(), &w) == nil && !w.Untracked {
-		_ = p.Progress.Failed(context.WithoutCancel(ctx), w.Item.LibraryID)
+	if (task.Type() == TypeIdentify || task.Type() == TypeMetadata || task.Type() == TypeImages || task.Type() == TypeProbe) &&
+		json.Unmarshal(task.Payload(), &w) == nil && !w.Untracked {
+		if progressErr := p.Progress.Failed(context.WithoutCancel(ctx), w.Item.LibraryID, w.ScanID, progressItemID(w.Item.Type, w.Item.Path)); progressErr != nil {
+			p.Log.Error("could not record task failure", "error", progressErr)
+		}
 	}
 }
 

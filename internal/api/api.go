@@ -559,6 +559,7 @@ func (s *Server) clearFailed(w http.ResponseWriter, r *http.Request) {
 	}
 	existingQueues, err := s.Inspector.Queues()
 	if err != nil {
+		s.Log.Error("could not list task queues for clearing failed tasks", "queue", queue, "error", err)
 		writeError(w, http.StatusInternalServerError, "could not list task queues")
 		return
 	}
@@ -573,6 +574,7 @@ func (s *Server) clearFailed(w http.ResponseWriter, r *http.Request) {
 		}
 		n, err := s.Inspector.DeleteAllArchivedTasks(physicalQueue)
 		if err != nil {
+			s.Log.Error("could not clear failed tasks", "queue", queue, "physical_queue", physicalQueue, "cleared", total, "error", err)
 			writeError(w, http.StatusInternalServerError, "could not clear failed tasks")
 			return
 		}

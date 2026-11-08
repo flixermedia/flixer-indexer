@@ -19,6 +19,8 @@ import (
 	"github.com/flixermedia/flixer-indexer/internal/models"
 	"github.com/flixermedia/flixer-indexer/internal/probe"
 	"github.com/flixermedia/flixer-indexer/internal/progress"
+	"github.com/flixermedia/flixer-indexer/internal/providers"
+	"github.com/flixermedia/flixer-indexer/internal/providers/registry"
 	"github.com/flixermedia/flixer-indexer/internal/trickplay"
 )
 
@@ -31,6 +33,7 @@ type fakeAPI struct {
 	lyricsUpdates         map[string]string
 	existingIntroSegments models.ExistingIntroSegments
 	removedTargets        []models.PathRemoval
+	manualMatches         map[string]map[string]string
 }
 
 func (f *fakeAPI) PruneLibrary(_ context.Context, libraryID, _ string) (int, error) {
@@ -48,6 +51,9 @@ func (f *fakeAPI) DeleteItemsAtPaths(_ context.Context, _ string, targets []mode
 
 func (f *fakeAPI) Libraries(context.Context) ([]models.Library, error) { return f.libs, nil }
 func (f *fakeAPI) Settings(context.Context) (models.Settings, error)   { return models.Settings{}, nil }
+func (f *fakeAPI) ManualMatch(_ context.Context, _, _ string, path string) (map[string]string, error) {
+	return f.manualMatches[path], nil
+}
 func (f *fakeAPI) IntroSyncCandidates(context.Context, string, string, string, int) ([]models.IntroSyncCandidate, string, error) {
 	return nil, "", nil
 }
@@ -74,6 +80,128 @@ func (f *fakeAPI) UpsertItem(_ context.Context, item models.Item) (string, error
 	defer f.mu.Unlock()
 	f.got = append(f.got, item)
 	return "id", nil
+}
+
+func TestIdentifyUsesManualSeriesMatchInsteadOfNFO(t *testing.T) {
+	root := t.TempDir()
+	show := filepath.Join(root, "Show")
+	if err := os.MkdirAll(filepath.Join(show, "Season 1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(show, "tvshow.nfo"), []byte(`<tvshow><title>Wrong show</title><uniqueid type="tmdb">100</uniqueid></tvshow>`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(show, "Season 1", "episode.nfo"), []byte(`<episodedetails><title>Wrong episode</title><uniqueid type="tmdb">101</uniqueid></episodedetails>`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lib := models.Library{ID: "lib", Type: models.LibraryTVShows, Folders: []models.Folder{{RootID: "root", AbsolutePath: root}}}
+	api := &fakeAPI{libs: []models.Library{lib}, manualMatches: map[string]map[string]string{show: {"tmdb": "200"}}}
+	mr := miniredis.RunT(t)
+	opt := asynq.RedisClientOpt{Addr: mr.Addr()}
+	queue := asynq.NewClient(opt)
+	defer queue.Close()
+	inspector := asynq.NewInspector(opt)
+	defer inspector.Close()
+	p := New(api, images.NewStore(t.TempDir(), "ffmpeg", "test"), fakeProbe{}, nil, queue, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	one := 1
+	for _, work := range []models.Work{
+		{Item: models.Item{LibraryID: "lib", Type: models.ItemSeries, Path: show}},
+		{Item: models.Item{LibraryID: "lib", Type: models.ItemEpisode, Path: filepath.Join(show, "Season 1", "episode.mkv"), SeasonNumber: &one, EpisodeNumber: &one, ProviderIDs: map[string]string{"tmdb": "101"}}, Hints: models.Hints{SeriesPath: show}},
+	} {
+		payload, err := json.Marshal(work)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := p.handleIdentify(context.Background(), asynq.NewTask(TypeIdentify, payload)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tasks, err := inspector.ListPendingTasks(config.QueueMetadata)
+	if err != nil || len(tasks) != 2 {
+		t.Fatalf("metadata tasks = %d, %v", len(tasks), err)
+	}
+	for _, task := range tasks {
+		work, err := decodeWork(asynq.NewTask(TypeMetadata, task.Payload))
+		if err != nil || !work.Force {
+			t.Fatalf("manual match work = %+v, %v", work, err)
+		}
+		if work.Item.Type == models.ItemSeries && (work.Item.ProviderIDs["tmdb"] != "200" || work.Item.Metadata.Title == "Wrong show") {
+			t.Fatalf("series match overwritten by NFO: %+v", work.Item)
+		}
+		if work.Item.Type == models.ItemEpisode && work.Hints.SeriesIDs["tmdb"] != "200" {
+			t.Fatalf("episode series match overwritten by NFO: %+v", work.Hints)
+		}
+		if work.Item.Type == models.ItemEpisode && (work.Item.Metadata.Title == "Wrong episode" || len(work.Item.ProviderIDs) != 0) {
+			t.Fatalf("episode kept metadata from the old match: %+v", work.Item)
+		}
+	}
+}
+
+func TestManualMatchRequiresProviderResult(t *testing.T) {
+	reg := registry.Build(models.Settings{Providers: map[string]models.ProviderSetting{
+		"anilist": {Enabled: false},
+	}}, nil, "test", "en")
+	p := &Pipeline{}
+	work := models.Work{
+		Item:        models.Item{Type: models.ItemSeries, Path: "/tv/Show", ProviderIDs: map[string]string{"tmdb": "123"}},
+		ManualMatch: true,
+	}
+	if err := p.lookup(context.Background(), reg, &work); err == nil {
+		t.Fatal("expected an error when the manual match cannot be resolved")
+	}
+	one := 1
+	episode := models.Work{
+		Item:        models.Item{Type: models.ItemEpisode, SeasonNumber: &one, EpisodeNumber: &one},
+		Hints:       models.Hints{SeriesPath: "/tv/Show", SeriesIDs: map[string]string{"tmdb": "123"}},
+		ManualMatch: true,
+	}
+	if err := p.lookup(context.Background(), reg, &episode); err == nil {
+		t.Fatal("expected an error when an episode's manual series match cannot be resolved")
+	}
+}
+
+type manualMatchProvider struct {
+	name  string
+	ids   map[string]string
+	title string
+}
+
+func (p manualMatchProvider) Name() string { return p.name }
+func (p manualMatchProvider) Supports(capability string) bool {
+	return capability == "indexer.provider.series" || capability == "indexer.provider.episode"
+}
+func (p manualMatchProvider) Series(context.Context, providers.Query) (*providers.Result, error) {
+	return &providers.Result{IDs: p.ids, Meta: models.Metadata{Title: p.title}}, nil
+}
+func (p manualMatchProvider) Episode(_ context.Context, ids map[string]string, _, _ int, _ string) (*providers.Result, error) {
+	if ids["tmdb"] != "200" {
+		return nil, nil
+	}
+	return &providers.Result{Meta: models.Metadata{Title: "Correct episode"}}, nil
+}
+
+func TestManualMatchUsesVerifiedSeriesMetadataForShowsAndEpisodes(t *testing.T) {
+	wrong := manualMatchProvider{name: "wrong", ids: map[string]string{"tvdb": "100"}, title: "Wrong show"}
+	right := manualMatchProvider{name: "right", ids: map[string]string{"tmdb": "200"}, title: "Correct show"}
+	reg := registry.Build(models.Settings{}, nil, "test", "en", wrong, right)
+	p := &Pipeline{}
+	series := models.Work{
+		Item:        models.Item{Type: models.ItemSeries, ProviderIDs: map[string]string{"tmdb": "200"}},
+		Hints:       models.Hints{Title: "Wrong show"},
+		ManualMatch: true,
+	}
+	if err := p.lookup(context.Background(), reg, &series); err != nil || series.Item.Metadata.Title != "Correct show" {
+		t.Fatalf("series = %+v, error = %v", series.Item, err)
+	}
+	one := 1
+	episode := models.Work{
+		Item:        models.Item{Type: models.ItemEpisode, SeasonNumber: &one, EpisodeNumber: &one},
+		Hints:       models.Hints{SeriesTitle: "Wrong show", SeriesIDs: map[string]string{"tmdb": "200"}},
+		ManualMatch: true,
+	}
+	if err := p.lookup(context.Background(), reg, &episode); err != nil || episode.Item.Metadata.Title != "Correct episode" || episode.Hints.SeriesIDs["tvdb"] != "" {
+		t.Fatalf("episode = %+v, hints = %+v, error = %v", episode.Item, episode.Hints, err)
+	}
 }
 
 func TestHandleLyricsSyncsExistingSidecar(t *testing.T) {
@@ -175,6 +303,46 @@ func TestEndToEnd(t *testing.T) {
 	}
 	if ep := types[models.ItemEpisode]; ep.EpisodeNumber == nil || *ep.EpisodeNumber != 1 || ep.Metadata.Title == "" {
 		t.Errorf("episode = %+v", ep)
+	}
+}
+
+func TestFailedLibraryWalkCannotPrune(t *testing.T) {
+	root := t.TempDir()
+	lib := models.Library{ID: "lib", Type: models.LibraryMovies, Folders: []models.Folder{{AbsolutePath: filepath.Join(root, "missing")}}}
+	api := &fakeAPI{libs: []models.Library{lib}}
+	mr := miniredis.RunT(t)
+	opt := asynq.RedisClientOpt{Addr: mr.Addr()}
+	queue := asynq.NewClient(opt)
+	defer queue.Close()
+	tracker := progress.New(redis.NewClient(&redis.Options{Addr: mr.Addr()}))
+	p := New(api, images.NewStore(t.TempDir(), "ffmpeg", "test"), fakeProbe{}, tracker, queue, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	payload, err := json.Marshal(models.ScanRequest{LibraryID: "lib"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.handleScan(context.Background(), asynq.NewTask(TypeScan, payload)); err == nil {
+		t.Fatal("expected unavailable folder to fail the scan")
+	}
+	scan, err := tracker.Get(context.Background(), "lib")
+	if err != nil || scan == nil || scan.State != progress.StateFailed || scan.Error == "" {
+		t.Fatalf("scan = %+v, %v", scan, err)
+	}
+	if len(api.pruned) != 0 {
+		t.Fatalf("failed scan pruned libraries: %v", api.pruned)
+	}
+}
+
+func TestTrackedWorkDoesNotShareItemLocksWithOtherRuns(t *testing.T) {
+	item := models.Item{LibraryID: "lib", Type: models.ItemSeries, Path: "/library/show"}
+	lock := func(scanID string) string {
+		data, err := json.Marshal(models.Work{Item: item, ScanID: scanID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return taskItemLockKey(TypeIdentify, data)
+	}
+	if lock("one") == lock("two") || lock("one") == lock("") || lock("one") != lock("one") {
+		t.Fatal("item locks must be stable within a scan and isolated from other work")
 	}
 }
 

@@ -67,6 +67,8 @@ flowchart LR
 
 `refresh:item` reprocesses an individual path. Worker stages use Redis/Asynq queues. Movie and episode timing syncs run on separate queues. The indexer tries TheIntroDB v4 first, then IntroDB (`api.introdb.app`) when timings are missing or the first request fails; IntroDB uses public reads and requires an IMDb ID. An optional TheIntroDB API key can be configured in Flixer's admin settings. Startup backfills existing indexed media, and future item upserts enqueue updates. Local NFO and artwork are preferred to provider results; generated caches can be stored under `CACHE_PATH`.
 
+Intro lookups are spaced across workers using Redis. A provider's HTTP 429 pauses its requests for `Retry-After` (up to seven days, or one hour when absent), while the other provider remains available. Confirmed misses are cached for seven days; rate limits and failures are not cached as misses. Deferred requests retry with jitter without incrementing the normal retry count. If a task has already exhausted that count on other failures, Asynq can archive it on a subsequent deferral; the periodic backfill can queue it again.
+
 ## ⚙️ Configuration
 
 | Variable | Purpose / default |
@@ -112,6 +114,25 @@ builds before the logger module is published. Refresh it from the logger
 repository with `bash scripts/vendor-go-sdk.sh /path/to/flixer-indexer`.
 
 Filesystem events scan only the changed media file or folder subtree. Removed or renamed items are deleted by exact path (or by subtree for removed directories), then any replacement paths from the same event batch are indexed. Artwork and metadata sidecars rescan their containing folder. Optional periodic rescans remain full-library scans for network shares that do not emit filesystem events.
+
+Tracked scans are isolated per run; a newer scan supersedes an older run's progress and its cleanup. Only the latest
+successful, nonempty full-library scan can remove stale entries.
+An unreadable or unresolved folder fails the scan instead of treating its contents as deleted. Empty scans skip
+cleanup as a safeguard against disconnected mounts; stale entries need a separate removal or a later nonempty scan.
+
+When different existing paths share a provider ID, Flixer keeps separate source records rather than overwriting one
+path. A targeted rescan can recover a source previously overwritten by such a collision. Admin-edited provider IDs
+take precedence over NFO matches on subsequent scans. For a manual match, provider results must confirm at least one
+known ID and must not contradict any known ID; if no provider can confirm the match, the item fails to index instead
+of falling back to an unrelated title. A manually matched series also takes precedence over its seasons' and episodes'
+NFO metadata and their unedited old provider IDs; local artwork is still used. Upgrade the API before the indexer so
+the indexer can read these manual matches. Automatic rename matching requires both paths to resolve under the same
+available media root and any manually corrected IDs to agree with the new scan. If they do not agree, the indexer keeps
+the old record and creates a separate source rather than assigning potentially unrelated metadata to it; review the
+sources in the admin editor. An unavailable or changed root is not treated as proof that a source moved.
+In the admin media editor, **Recover a missing source** opens the library folder picker and queues a targeted scan.
+After the scan finishes, find the recovered item and correct its provider IDs in the editor. This recovery does not
+merge items or split a previously grouped item; it only reindexes selected folders.
 
 ## 🔌 Internal API
 

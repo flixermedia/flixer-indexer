@@ -32,9 +32,12 @@ type scan struct {
 
 // Scan walks every folder of the library.
 func Scan(ctx context.Context, lib models.Library, emit Emit) error {
+	if len(lib.Folders) == 0 {
+		return fmt.Errorf("library %s has no accessible folders", lib.ID)
+	}
 	for _, f := range lib.Folders {
 		if f.AbsolutePath == "" {
-			continue
+			return fmt.Errorf("library %s has a folder with no resolved path", lib.ID)
 		}
 		if _, err := os.Stat(f.AbsolutePath); err != nil {
 			return fmt.Errorf("library folder %s unavailable: %w", f.AbsolutePath, err)
@@ -137,13 +140,13 @@ func (s *scan) wanted(p string) bool {
 	return s.target == "" || within(p, s.target) || within(s.target, p)
 }
 
-func (s *scan) entries(dir string) []os.DirEntry {
+func (s *scan) entries(dir string) ([]os.DirEntry, error) {
 	list, err := os.ReadDir(dir)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("read directory %s: %w", dir, err)
 	}
 	sort.Slice(list, func(i, j int) bool { return strings.ToLower(list[i].Name()) < strings.ToLower(list[j].Name()) })
-	return list
+	return list, nil
 }
 
 func (s *scan) base(typ, path string) models.Item {
@@ -190,7 +193,11 @@ func (s *scan) movies(dir string, isRoot bool) error {
 	if !s.wanted(dir) {
 		return nil
 	}
-	for _, e := range s.entries(dir) {
+	list, err := s.entries(dir)
+	if err != nil {
+		return err
+	}
+	for _, e := range list {
 		p := filepath.Join(dir, e.Name())
 		if strings.HasPrefix(e.Name(), ".") || naming.IsExtra(e.Name()) {
 			continue
@@ -235,7 +242,11 @@ func (s *scan) homeVideos(dir string) error {
 	if !s.wanted(dir) {
 		return nil
 	}
-	for _, e := range s.entries(dir) {
+	list, err := s.entries(dir)
+	if err != nil {
+		return err
+	}
+	for _, e := range list {
 		p := filepath.Join(dir, e.Name())
 		if strings.HasPrefix(e.Name(), ".") {
 			continue
@@ -266,7 +277,11 @@ func (s *scan) homeVideos(dir string) error {
 
 // shows treats each direct child directory as a series.
 func (s *scan) shows(root string) error {
-	for _, e := range s.entries(root) {
+	list, err := s.entries(root)
+	if err != nil {
+		return err
+	}
+	for _, e := range list {
 		p := filepath.Join(root, e.Name())
 		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") || naming.IsExtra(e.Name()) || !s.wanted(p) {
 			continue
@@ -293,7 +308,11 @@ func (s *scan) series(dir string) error {
 	seasonPaths := map[int]string{}
 	var walk func(d string, season *int) error
 	walk = func(d string, season *int) error {
-		for _, e := range s.entries(d) {
+		list, err := s.entries(d)
+		if err != nil {
+			return err
+		}
+		for _, e := range list {
 			p := filepath.Join(d, e.Name())
 			if strings.HasPrefix(e.Name(), ".") || naming.IsExtra(e.Name()) {
 				continue
@@ -368,7 +387,10 @@ func (s *scan) music(dir string) error {
 	if !s.wanted(dir) {
 		return nil
 	}
-	list := s.entries(dir)
+	list, err := s.entries(dir)
+	if err != nil {
+		return err
+	}
 	var audio []string
 	for _, e := range list {
 		if !e.IsDir() && !strings.HasPrefix(e.Name(), ".") && naming.IsAudio(e.Name()) {
@@ -376,7 +398,11 @@ func (s *scan) music(dir string) error {
 		}
 	}
 	isRoot := samePath(dir, s.folder.AbsolutePath)
-	if (len(audio) > 0 || hasDiscFolders(dir, list)) && !isRoot {
+	hasDiscs, err := hasDiscFolders(dir, list)
+	if err != nil {
+		return err
+	}
+	if (len(audio) > 0 || hasDiscs) && !isRoot {
 		if err := s.album(dir, list); err != nil {
 			return err
 		}
@@ -415,7 +441,11 @@ func (s *scan) album(dir string, list []os.DirEntry) error {
 	trackHints := models.Hints{Artist: artist, Album: parsed.Title, SeriesPath: dir}
 	var tracks func(d string, disc int) error
 	tracks = func(d string, disc int) error {
-		for _, e := range s.entries(d) {
+		list, err := s.entries(d)
+		if err != nil {
+			return err
+		}
+		for _, e := range list {
 			p := filepath.Join(d, e.Name())
 			if strings.HasPrefix(e.Name(), ".") {
 				continue
@@ -455,7 +485,11 @@ func (s *scan) album(dir string, list []os.DirEntry) error {
 // seasons or episode-numbered files are series, everything else is movies.
 func (s *scan) mixed() error {
 	root := s.folder.AbsolutePath
-	for _, e := range s.entries(root) {
+	list, err := s.entries(root)
+	if err != nil {
+		return err
+	}
+	for _, e := range list {
 		p := filepath.Join(root, e.Name())
 		if strings.HasPrefix(e.Name(), ".") || naming.IsExtra(e.Name()) || !s.wanted(p) {
 			continue
@@ -468,8 +502,11 @@ func (s *scan) mixed() error {
 			}
 			continue
 		}
-		var err error
-		switch classify(p) {
+		kind, err := classify(p)
+		if err != nil {
+			return err
+		}
+		switch kind {
 		case models.LibraryMusic:
 			err = s.musicDir(p)
 		case models.LibraryTVShows:
@@ -486,22 +523,35 @@ func (s *scan) mixed() error {
 
 func (s *scan) musicDir(dir string) error {
 	// Artist/Album layouts are handled by treating the folder as a music root.
-	if hasFiles(dir, naming.IsAudio) {
-		return s.album(dir, s.entries(dir))
+	list, err := s.entries(dir)
+	if err != nil {
+		return err
+	}
+	for _, entry := range list {
+		if !entry.IsDir() && naming.IsAudio(entry.Name()) {
+			return s.album(dir, list)
+		}
 	}
 	return s.music(dir)
 }
 
-func classify(dir string) string {
-	list, _ := os.ReadDir(dir)
+func classify(dir string) (string, error) {
+	list, err := os.ReadDir(dir)
+	if err != nil {
+		return "", fmt.Errorf("read directory %s: %w", dir, err)
+	}
 	audio, video := 0, 0
 	for _, e := range list {
 		switch {
 		case e.IsDir():
 			if _, ok := naming.SeasonFromDir(e.Name()); ok {
-				return models.LibraryTVShows
+				return models.LibraryTVShows, nil
 			}
-			if hasFiles(filepath.Join(dir, e.Name()), naming.IsAudio) {
+			found, err := hasFiles(filepath.Join(dir, e.Name()), naming.IsAudio)
+			if err != nil {
+				return "", err
+			}
+			if found {
 				audio++
 			}
 		case naming.IsAudio(e.Name()):
@@ -509,24 +559,27 @@ func classify(dir string) string {
 		case naming.IsVideo(e.Name()):
 			video++
 			if naming.ParseEpisode(naming.Base(e.Name()), nil).Matched {
-				return models.LibraryTVShows
+				return models.LibraryTVShows, nil
 			}
 		}
 	}
 	if audio > 0 && video == 0 {
-		return models.LibraryMusic
+		return models.LibraryMusic, nil
 	}
-	return models.LibraryMovies
+	return models.LibraryMovies, nil
 }
 
-func hasFiles(dir string, match func(string) bool) bool {
-	list, _ := os.ReadDir(dir)
+func hasFiles(dir string, match func(string) bool) (bool, error) {
+	list, err := os.ReadDir(dir)
+	if err != nil {
+		return false, fmt.Errorf("read directory %s: %w", dir, err)
+	}
 	for _, e := range list {
 		if !e.IsDir() && match(e.Name()) {
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
 func samePath(a, b string) bool {
@@ -539,11 +592,17 @@ func within(child, parent string) bool {
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
-func hasDiscFolders(dir string, list []os.DirEntry) bool {
+func hasDiscFolders(dir string, list []os.DirEntry) (bool, error) {
 	for _, e := range list {
-		if _, ok := naming.DiscFromDir(e.Name()); ok && e.IsDir() && hasFiles(filepath.Join(dir, e.Name()), naming.IsAudio) {
-			return true
+		if _, ok := naming.DiscFromDir(e.Name()); ok && e.IsDir() {
+			found, err := hasFiles(filepath.Join(dir, e.Name()), naming.IsAudio)
+			if err != nil {
+				return false, err
+			}
+			if found {
+				return true, nil
+			}
 		}
 	}
-	return false
+	return false, nil
 }

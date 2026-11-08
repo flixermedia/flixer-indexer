@@ -6,7 +6,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
+	"github.com/flixermedia/flixer-indexer/internal/httpx"
 	"github.com/flixermedia/flixer-indexer/internal/models"
 )
 
@@ -15,6 +17,7 @@ func TestGetMediaPrefersTVDBAndNormalizesV4Media(t *testing.T) {
 		if r.URL.Path != "/v4/media" || r.URL.Query().Get("tvdb_id") != "169" || r.URL.Query().Get("tmdb_id") != "" {
 			t.Errorf("request = %s?%s", r.URL.Path, r.URL.RawQuery)
 		}
+
 		if r.URL.Query().Get("duration_ms") != "7200000" {
 			t.Errorf("duration_ms = %q", r.URL.Query().Get("duration_ms"))
 		}
@@ -99,6 +102,7 @@ func TestGetMediaHandlesMissingIDsAndUnusableResponse(t *testing.T) {
 
 func TestGetMediaReportsRateLimit(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "120")
 		http.Error(w, "rate limited", http.StatusTooManyRequests)
 	}))
 	defer server.Close()
@@ -108,5 +112,27 @@ func TestGetMediaReportsRateLimit(t *testing.T) {
 	})
 	if !errors.Is(err, ErrRateLimited) {
 		t.Fatalf("error = %v, want rate-limit error", err)
+	}
+	var limited *RateLimitError
+	if !errors.As(err, &limited) || limited.RetryAfter != 2*time.Minute {
+		t.Fatalf("error = %v, want 2 minute retry delay", err)
+	}
+}
+
+func TestRetryAfter(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		header string
+		want   time.Duration
+	}{
+		{"120", 2 * time.Minute},
+		{"999999999", 7 * 24 * time.Hour},
+		{now.Add(time.Minute).Format(http.TimeFormat), time.Minute},
+		{"bad", 0},
+		{"0", 0},
+	} {
+		if got := httpx.ParseRetryAfter(test.header, now); got != test.want {
+			t.Errorf("%q: got %s, want %s", test.header, got, test.want)
+		}
 	}
 }

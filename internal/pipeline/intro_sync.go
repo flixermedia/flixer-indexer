@@ -70,17 +70,47 @@ func (p *Pipeline) handleIntroSync(ctx context.Context, task *asynq.Task, itemTy
 		p.logger(ctx).Info("intro timing sync skipped; segment results already exist", "item", candidate.ID, "type", itemType)
 		return nil
 	}
+	missKey, err := introMissKey(candidate, p.introDBEnabled.Load(), p.introDBFallbackEnabled.Load())
+	if err != nil {
+		return fmt.Errorf("prepare intro lookup cache key: %w", err)
+	}
+	if p.TaskLocks != nil {
+		missing, err := p.TaskLocks.Exists(ctx, missKey).Result()
+		if err != nil {
+			return fmt.Errorf("check intro lookup cache: %w", err)
+		}
+		if missing > 0 {
+			return nil
+		}
+	}
 	segments := map[string]models.IntroTimeRange{}
+	lookedUp := false
 	if hasAddress(candidate.ProviderIDs) && (itemType == models.ItemMovie || candidate.Season != nil && candidate.Episode != nil) {
 		var primaryErr error
 		if p.introDBEnabled.Load() {
 			if p.IntroDB == nil {
 				primaryErr = errors.New("TheIntroDB client is unavailable")
 			} else {
-				segments, primaryErr = p.IntroDB.GetMedia(ctx, candidate)
+				delay, err := p.introPermit(ctx, "theintrodb")
+				if err != nil {
+					return err
+				}
+				if delay > 0 {
+					primaryErr = deferredIntro(max(delay, 30*time.Second))
+				} else {
+					lookedUp = true
+					segments, primaryErr = p.IntroDB.GetMedia(ctx, candidate)
+					if errors.Is(primaryErr, theintrodb.ErrRateLimited) {
+						delay, err = p.introCooldown(ctx, "theintrodb", primaryErr)
+						if err != nil {
+							return err
+						}
+						primaryErr = deferredIntro(delay)
+					}
+				}
 			}
 		}
-		primaryRateLimited := errors.Is(primaryErr, theintrodb.ErrRateLimited)
+		primaryRateLimited := errors.Is(primaryErr, errIntroDeferred)
 		if primaryErr != nil && !primaryRateLimited {
 			p.logger(ctx).Warn("TheIntroDB lookup failed; trying IntroDB fallback", "item", candidate.ID, "error", primaryErr)
 		}
@@ -89,26 +119,37 @@ func (p *Pipeline) handleIntroSync(ctx context.Context, task *asynq.Task, itemTy
 			candidate.ProviderIDs["imdb"] != "" &&
 			(primaryErr != nil || segments["intro"].EndMs == 0 || segments["credits"].EndMs == 0)
 		if primaryRateLimited && !needsFallback {
-			return retryAfter(primaryErr, introRateLimitRetryDelay)
+			return primaryErr
 		}
 		if needsFallback {
 			if p.IntroDBFallback == nil {
 				err := errors.New("IntroDB fallback client is unavailable")
-				if primaryRateLimited {
-					return retryAfter(err, introRateLimitRetryDelay)
-				}
 				return err
 			}
+			delay, err := p.introPermit(ctx, "introdb")
+			if err != nil {
+				return err
+			}
+			if delay > 0 {
+				return deferredIntro(max(delay, 30*time.Second))
+			}
+			lookedUp = true
 			fallbackSegments, err := p.IntroDBFallback.GetMedia(ctx, candidate)
 			if err != nil {
-				err = fmt.Errorf("IntroDB fallback lookup failed: %w", err)
-				if primaryRateLimited || errors.Is(err, introdb.ErrRateLimited) {
-					return retryAfter(err, introRateLimitRetryDelay)
+				if errors.Is(err, introdb.ErrRateLimited) {
+					delay, cooldownErr := p.introCooldown(ctx, "introdb", err)
+					if cooldownErr != nil {
+						return cooldownErr
+					}
+					return deferredIntro(delay)
 				}
-				return err
+				return fmt.Errorf("IntroDB fallback lookup failed: %w", err)
 			}
 			if primaryRateLimited && len(fallbackSegments) == 0 {
-				return retryAfter(errors.New("TheIntroDB rate limited the request and IntroDB had no timings"), introRateLimitRetryDelay)
+				return primaryErr
+			}
+			if primaryErr != nil && len(fallbackSegments) == 0 {
+				return fmt.Errorf("TheIntroDB lookup failed and IntroDB had no timings: %w", primaryErr)
 			}
 			if segments == nil {
 				segments = make(map[string]models.IntroTimeRange, len(fallbackSegments))
@@ -125,7 +166,15 @@ func (p *Pipeline) handleIntroSync(ctx context.Context, task *asynq.Task, itemTy
 			return primaryErr
 		}
 	}
-	return p.Client.UpsertIntroSegments(ctx, models.IntroSegmentUpdate{ItemID: candidate.ID, Segments: segments})
+	if err := p.Client.UpsertIntroSegments(ctx, models.IntroSegmentUpdate{ItemID: candidate.ID, Segments: segments}); err != nil {
+		return err
+	}
+	if len(segments) == 0 && lookedUp && p.TaskLocks != nil {
+		if err := p.TaskLocks.Set(ctx, missKey, "1", introMissTTL).Err(); err != nil {
+			return fmt.Errorf("save intro lookup miss: %w", err)
+		}
+	}
+	return nil
 }
 
 func hasAddress(ids map[string]string) bool {

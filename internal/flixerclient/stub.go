@@ -50,6 +50,10 @@ func (s *Stub) Libraries(context.Context) ([]models.Library, error) {
 
 func (s *Stub) Settings(context.Context) (models.Settings, error) { return s.settings, nil }
 
+func (s *Stub) ManualMatch(context.Context, string, string, string) (map[string]string, error) {
+	return nil, nil
+}
+
 func (s *Stub) PruneLibrary(context.Context, string, string) (int, error) { return 0, nil }
 
 func (s *Stub) DeleteItemsAtPaths(context.Context, string, []models.PathRemoval) (int, error) {

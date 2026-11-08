@@ -170,6 +170,93 @@ func TestClearFailedSkipsPriorityQueueThatHasNeverExisted(t *testing.T) {
 	}
 }
 
+func TestClearFailedDeletesArchivedTasksFromBothQueuesOnly(t *testing.T) {
+	mr := miniredis.RunT(t)
+	opt := asynq.RedisClientOpt{Addr: mr.Addr()}
+	client := asynq.NewClient(opt)
+	t.Cleanup(func() { _ = client.Close() })
+	inspector := asynq.NewInspector(opt)
+	t.Cleanup(func() { _ = inspector.Close() })
+	h := (&Server{Secret: secret, Inspector: inspector, Log: slog.New(slog.NewTextHandler(testWriter{t}, nil))}).Handler()
+
+	enqueue := func(queue string, archive bool) {
+		t.Helper()
+		info, err := client.Enqueue(asynq.NewTask("test", nil), asynq.Queue(queue))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if archive {
+			if err := inspector.ArchiveTask(queue, info.ID); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	enqueue("images", true)
+	enqueue("images-priority", true)
+	enqueue("images", false)
+	enqueue("metadata", true)
+
+	rec := do(h, http.MethodPost, "/internal/queues/images/clear-failed", nil, true)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"cleared":2`) {
+		t.Fatalf("clear failed = %d %s, want two archived tasks cleared", rec.Code, rec.Body)
+	}
+	images, err := inspector.GetQueueInfo("images")
+	if err != nil || images.Archived != 0 || images.Pending != 1 {
+		t.Fatalf("images queue = %+v, error %v", images, err)
+	}
+	priority, err := inspector.GetQueueInfo("images-priority")
+	if err != nil || priority.Archived != 0 {
+		t.Fatalf("priority queue = %+v, error %v", priority, err)
+	}
+	other, err := inspector.GetQueueInfo("metadata")
+	if err != nil || other.Archived != 1 {
+		t.Fatalf("other queue = %+v, error %v", other, err)
+	}
+}
+
+func TestClearFailedDeletesNormalQueueWhenPriorityQueueIsAbsent(t *testing.T) {
+	mr := miniredis.RunT(t)
+	opt := asynq.RedisClientOpt{Addr: mr.Addr()}
+	client := asynq.NewClient(opt)
+	t.Cleanup(func() { _ = client.Close() })
+	inspector := asynq.NewInspector(opt)
+	t.Cleanup(func() { _ = inspector.Close() })
+	info, err := client.Enqueue(asynq.NewTask("test", nil), asynq.Queue("images"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := inspector.ArchiveTask("images", info.ID); err != nil {
+		t.Fatal(err)
+	}
+	h := (&Server{Secret: secret, Inspector: inspector, Log: slog.New(slog.NewTextHandler(testWriter{t}, nil))}).Handler()
+
+	rec := do(h, http.MethodPost, "/internal/queues/images/clear-failed", nil, true)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"cleared":1`) {
+		t.Fatalf("clear failed = %d %s, want one archived task cleared", rec.Code, rec.Body)
+	}
+	queue, err := inspector.GetQueueInfo("images")
+	if err != nil || queue.Archived != 0 {
+		t.Fatalf("images queue = %+v, error %v", queue, err)
+	}
+}
+
+func TestClearFailedReportsRedisFailure(t *testing.T) {
+	mr := miniredis.RunT(t)
+	inspector := asynq.NewInspector(asynq.RedisClientOpt{Addr: mr.Addr(), DialTimeout: 100 * time.Millisecond})
+	t.Cleanup(func() { _ = inspector.Close() })
+	var logs bytes.Buffer
+	h := (&Server{Secret: secret, Inspector: inspector, Log: slog.New(slog.NewTextHandler(&logs, nil))}).Handler()
+	mr.Close()
+
+	rec := do(h, http.MethodPost, "/internal/queues/images/clear-failed", nil, true)
+	if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), "could not list task queues") {
+		t.Fatalf("clear failed = %d %s, want 500", rec.Code, rec.Body)
+	}
+	if !strings.Contains(logs.String(), "could not list task queues for clearing failed tasks") || !strings.Contains(logs.String(), "images") {
+		t.Fatalf("missing diagnostic log: %s", logs.String())
+	}
+}
+
 func TestCheckPluginResponse(t *testing.T) {
 	for output, wantOK := range map[string]bool{
 		`{"result":{"ok":true}}`:                         true,

@@ -45,6 +45,7 @@ type Task struct {
 	RootID        string `json:"rootId"`
 	RelativePath  string `json:"relativePath"`
 	TrackProgress bool   `json:"trackProgress,omitempty"`
+	ScanID        string `json:"scanId,omitempty"`
 }
 
 type Index struct {
