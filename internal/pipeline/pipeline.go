@@ -23,6 +23,7 @@ import (
 
 	"github.com/flixermedia/flixer-indexer/internal/config"
 	"github.com/flixermedia/flixer-indexer/internal/flixerclient"
+	"github.com/flixermedia/flixer-indexer/internal/httpx"
 	"github.com/flixermedia/flixer-indexer/internal/images"
 	"github.com/flixermedia/flixer-indexer/internal/introdb"
 	"github.com/flixermedia/flixer-indexer/internal/lyrics"
@@ -53,13 +54,16 @@ const (
 )
 
 const (
-	maxRetry    = 3
-	uniqueFor   = 30 * time.Minute
-	taskLockTTL = 24 * time.Hour
-	libraryTTL  = 30 * time.Second
+	maxRetry                     = 3
+	uniqueFor                    = 30 * time.Minute
+	taskLockTTL                  = 24 * time.Hour
+	libraryTTL                   = 30 * time.Second
+	providerRateLimitLogInterval = 10 * time.Minute
 )
 
 const taskLockHeader = "flixer-item-task-lock"
+
+var errProviderDeferred = errors.New("provider rate limited; retry scheduled")
 
 // Prober inspects media files; *probe.Prober is the production implementation.
 type Prober interface {
@@ -107,6 +111,9 @@ type Pipeline struct {
 	mu        sync.Mutex
 	libs      map[string]models.Library
 	libsFetch time.Time
+
+	providerRateLimitMu     sync.Mutex
+	providerRateLimitLogged map[string]time.Time
 }
 
 // New builds a pipeline. The provider registry must be set before work runs.
@@ -384,7 +391,7 @@ func (p *Pipeline) withTaskLog(queue string, h asynq.HandlerFunc) asynq.HandlerF
 	return func(ctx context.Context, t *asynq.Task) error {
 		id, ok := asynq.GetTaskID(ctx)
 		if !ok || p.TaskLogs == nil {
-			err := h(ctx, t)
+			err := p.deferProviderRateLimit(h(ctx, t))
 			p.releaseFinishedTaskLock(ctx, t, err)
 			return err
 		}
@@ -405,15 +412,47 @@ func (p *Pipeline) withTaskLog(queue string, h asynq.HandlerFunc) asynq.HandlerF
 			}
 		}
 		p.logger(ctx).Info("attempt started", args...)
-		err := h(ctx, t)
+		err := p.deferProviderRateLimit(h(ctx, t))
 		p.releaseFinishedTaskLock(ctx, t, err)
 		if err != nil {
-			p.logger(ctx).Error("attempt failed", "error", err)
+			if !errors.Is(err, errProviderDeferred) {
+				p.logger(ctx).Error("attempt failed", "error", err)
+			}
 		} else {
 			p.logger(ctx).Info("attempt finished")
 		}
 		return err
 	}
+}
+
+func (p *Pipeline) deferProviderRateLimit(err error) error {
+	var limited *httpx.RateLimitError
+	if !errors.As(err, &limited) {
+		return err
+	}
+	delay := limited.RetryAfter
+	if delay <= 0 {
+		delay = time.Minute
+	}
+
+	now := time.Now()
+	p.providerRateLimitMu.Lock()
+	if p.providerRateLimitLogged == nil {
+		p.providerRateLimitLogged = make(map[string]time.Time)
+	}
+	last, logged := p.providerRateLimitLogged[limited.Provider]
+	if !logged || now.Sub(last) >= providerRateLimitLogInterval {
+		p.providerRateLimitLogged[limited.Provider] = now
+		logged = false
+	} else {
+		logged = true
+	}
+	p.providerRateLimitMu.Unlock()
+
+	if !logged {
+		p.Log.Warn("metadata provider rate limited; lookups temporarily deferred", "provider", limited.Provider, "retry_after", delay)
+	}
+	return retryAfter(errProviderDeferred, delay)
 }
 
 func isPriorityTask(task *asynq.Task) bool {
@@ -455,7 +494,7 @@ func (p *Pipeline) handlers() map[string]map[string]asynq.HandlerFunc {
 // OnError is the Asynq error handler. When a task has used up its retries the
 // item counts as failed in its scan's progress.
 func (p *Pipeline) OnError(ctx context.Context, task *asynq.Task, err error) {
-	if errors.Is(err, errIntroDeferred) {
+	if errors.Is(err, errIntroDeferred) || errors.Is(err, errProviderDeferred) {
 		return
 	}
 	retried, _ := asynq.GetRetryCount(ctx)

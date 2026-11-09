@@ -22,6 +22,21 @@ import (
 // ErrNotFound is returned for 404 responses.
 var ErrNotFound = errors.New("not found")
 
+// ErrRateLimited is returned when a provider asks the indexer to slow down.
+var ErrRateLimited = errors.New("provider rate limited the request")
+
+// RateLimitError carries the provider cooldown without exposing the request URL.
+type RateLimitError struct {
+	Provider   string
+	RetryAfter time.Duration
+}
+
+func (e *RateLimitError) Error() string {
+	return fmt.Sprintf("%s rate limited the request", e.Provider)
+}
+
+func (e *RateLimitError) Unwrap() error { return ErrRateLimited }
+
 // Stats counts a provider's traffic.
 type Stats struct {
 	Requests    atomic.Int64
@@ -51,8 +66,9 @@ type Client struct {
 	Stats      *Stats
 	HTTP       *http.Client
 
-	mu   sync.Mutex
-	next time.Time
+	mu             sync.Mutex
+	next           time.Time
+	rateLimitUntil time.Time
 }
 
 // New returns a client with sensible defaults.
@@ -94,6 +110,10 @@ type Request struct {
 
 // Do performs the request and returns the response body.
 func (c *Client) Do(ctx context.Context, r Request) ([]byte, error) {
+	if delay := c.rateLimitRemaining(); delay > 0 {
+		return nil, &RateLimitError{Provider: c.Name, RetryAfter: delay}
+	}
+
 	method := r.Method
 	if method == "" {
 		method = http.MethodGet
@@ -108,8 +128,14 @@ func (c *Client) Do(ctx context.Context, r Request) ([]byte, error) {
 
 	var lastErr error
 	for attempt := 0; attempt <= c.MaxRetries; attempt++ {
+		if delay := c.rateLimitRemaining(); delay > 0 {
+			return nil, &RateLimitError{Provider: c.Name, RetryAfter: delay}
+		}
 		if err := c.wait(ctx); err != nil {
 			return nil, err
+		}
+		if delay := c.rateLimitRemaining(); delay > 0 {
+			return nil, &RateLimitError{Provider: c.Name, RetryAfter: delay}
 		}
 		req, err := http.NewRequestWithContext(ctx, method, r.URL, bytes.NewReader(payload))
 		if err != nil {
@@ -141,10 +167,20 @@ func (c *Client) Do(ctx context.Context, r Request) ([]byte, error) {
 		switch {
 		case resp.StatusCode == http.StatusNotFound:
 			return nil, ErrNotFound
-		case resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable:
+		case resp.StatusCode == http.StatusTooManyRequests:
+			c.Stats.RateLimited.Add(1)
+			delay := ParseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
+			if delay > 0 {
+				c.blockFor(delay)
+				return nil, &RateLimitError{Provider: c.Name, RetryAfter: delay}
+			}
+			lastErr = &RateLimitError{Provider: c.Name, RetryAfter: time.Minute}
+			c.sleep(ctx, backoff(attempt, 0))
+			continue
+		case resp.StatusCode == http.StatusServiceUnavailable:
 			c.Stats.RateLimited.Add(1)
 			lastErr = fmt.Errorf("%s: status %d", c.Name, resp.StatusCode)
-			c.sleep(ctx, backoff(attempt, retryAfter(resp)))
+			c.sleep(ctx, backoff(attempt, ParseRetryAfter(resp.Header.Get("Retry-After"), time.Now())))
 			continue
 		case resp.StatusCode < 200 || resp.StatusCode > 299:
 			c.Stats.Errors.Add(1)
@@ -155,7 +191,29 @@ func (c *Client) Do(ctx context.Context, r Request) ([]byte, error) {
 		}
 		return body, nil
 	}
+	var rateLimit *RateLimitError
+	if errors.As(lastErr, &rateLimit) {
+		c.blockFor(rateLimit.RetryAfter)
+	}
 	return nil, lastErr
+}
+
+func (c *Client) rateLimitRemaining() time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return time.Until(c.rateLimitUntil)
+}
+
+func (c *Client) blockFor(delay time.Duration) {
+	if delay <= 0 {
+		delay = time.Minute
+	}
+	until := time.Now().Add(delay)
+	c.mu.Lock()
+	if until.After(c.rateLimitUntil) {
+		c.rateLimitUntil = until
+	}
+	c.mu.Unlock()
 }
 
 // GetJSON fetches url and decodes the JSON response into out.
@@ -204,14 +262,6 @@ func backoff(attempt int, hinted time.Duration) time.Duration {
 		d = 10 * time.Second
 	}
 	return d
-}
-
-func retryAfter(resp *http.Response) time.Duration {
-	value := resp.Header.Get("Retry-After")
-	if seconds, err := strconv.Atoi(value); err == nil && seconds >= 0 {
-		return time.Duration(seconds) * time.Second
-	}
-	return 0
 }
 
 // ParseRetryAfter accepts a delay in seconds or an HTTP date.

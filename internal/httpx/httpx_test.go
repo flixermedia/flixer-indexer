@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestRetriesOnRateLimit(t *testing.T) {
@@ -29,6 +30,32 @@ func TestRetriesOnRateLimit(t *testing.T) {
 	}
 	if calls.Load() != 2 || c.Stats.RateLimited.Load() != 1 {
 		t.Errorf("calls = %d, rateLimited = %d", calls.Load(), c.Stats.RateLimited.Load())
+	}
+}
+
+func TestRateLimitDefersAndBlocksFurtherProviderRequests(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Retry-After", "30")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	c := New("test-provider", "ua", 0)
+	var out any
+	err := c.GetJSON(context.Background(), srv.URL, nil, &out)
+	var limited *RateLimitError
+	if !errors.As(err, &limited) || !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("error = %v, want typed rate limit error", err)
+	}
+	if limited.Provider != "test-provider" || limited.RetryAfter < 29*time.Second {
+		t.Fatalf("rate limit = %+v, want provider and retry delay", limited)
+	}
+
+	err = c.GetJSON(context.Background(), srv.URL, nil, &out)
+	if !errors.As(err, &limited) || calls.Load() != 1 {
+		t.Fatalf("second error = %v, calls = %d; expected cooldown without another request", err, calls.Load())
 	}
 }
 
