@@ -403,7 +403,7 @@ func (s *scan) music(dir string) error {
 		return err
 	}
 	if (len(audio) > 0 || hasDiscs) && !isRoot {
-		if err := s.album(dir, list); err != nil {
+		if err := s.album(dir); err != nil {
 			return err
 		}
 		return nil
@@ -418,7 +418,7 @@ func (s *scan) music(dir string) error {
 	return nil
 }
 
-func (s *scan) album(dir string, list []os.DirEntry) error {
+func (s *scan) album(dir string) error {
 	// A Disc N folder is part of its parent's album.
 	if _, ok := naming.DiscFromDir(filepath.Base(dir)); ok {
 		parent := filepath.Dir(dir)
@@ -477,7 +477,6 @@ func (s *scan) album(dir string, list []os.DirEntry) error {
 		}
 		return nil
 	}
-	_ = list
 	return tracks(dir, 0)
 }
 
@@ -529,7 +528,7 @@ func (s *scan) musicDir(dir string) error {
 	}
 	for _, entry := range list {
 		if !entry.IsDir() && naming.IsAudio(entry.Name()) {
-			return s.album(dir, list)
+			return s.album(dir)
 		}
 	}
 	return s.music(dir)

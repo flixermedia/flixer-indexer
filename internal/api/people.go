@@ -33,7 +33,8 @@ const (
 var (
 	personIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 	personHTTP      = &http.Client{
-		Timeout:       personFetchWait,
+		Timeout: personFetchWait,
+		// The URL host is allowlisted before the request; redirects must not bypass that check.
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
 	personLocks sync.Map

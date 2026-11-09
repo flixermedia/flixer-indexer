@@ -24,6 +24,7 @@ func deferredIntro(delay time.Duration) error {
 	if delay <= 0 {
 		delay = introRateLimitRetryDelay
 	}
+	// Spread retries so tasks deferred for the same provider do not resume together.
 	jitter := time.Duration(rand.Int64N(int64(min(delay/5, 5*time.Minute)) + 1))
 	return retryAfter(errIntroDeferred, delay+jitter)
 }

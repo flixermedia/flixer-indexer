@@ -180,6 +180,7 @@ func firstRange(values []timestamp, durationMs int64) (models.IntroTimeRange, bo
 		}
 		var end int64
 		if string(endRaw) == "null" {
+			// A null end marks the segment through the item's full duration.
 			end = durationMs
 		} else {
 			var validEnd bool
@@ -196,6 +197,7 @@ func firstRange(values []timestamp, durationMs int64) (models.IntroTimeRange, bo
 	if len(ranges) == 0 {
 		return models.IntroTimeRange{}, false
 	}
+	// The API can return alternatives; persist the earliest valid range.
 	sort.Slice(ranges, func(i, j int) bool { return ranges[i].StartMs < ranges[j].StartMs })
 	return ranges[0], true
 }

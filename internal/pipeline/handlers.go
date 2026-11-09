@@ -18,7 +18,6 @@ import (
 	"github.com/flixermedia/flixer-indexer/internal/models"
 	"github.com/flixermedia/flixer-indexer/internal/naming"
 	"github.com/flixermedia/flixer-indexer/internal/nfo"
-	"github.com/flixermedia/flixer-indexer/internal/probe"
 	"github.com/flixermedia/flixer-indexer/internal/providers"
 	"github.com/flixermedia/flixer-indexer/internal/providers/registry"
 	"github.com/flixermedia/flixer-indexer/internal/scanner"
@@ -389,7 +388,8 @@ func (p *Pipeline) handleIdentify(ctx context.Context, t *asynq.Task) error {
 			}
 		}
 		if item.Type == models.ItemSeason || item.Type == models.ItemEpisode {
-			if path := filepath.Join(w.Hints.SeriesPath, "tvshow.nfo"); w.Hints.SeriesPath != "" {
+			if w.Hints.SeriesPath != "" {
+				path := filepath.Join(w.Hints.SeriesPath, "tvshow.nfo")
 				if data, err := nfo.Read(path); err == nil && len(seriesManualIDs) == 0 {
 					w.Hints.SeriesIDs = providers.MergeIDs(w.Hints.SeriesIDs, data.IDs)
 				}
@@ -489,7 +489,7 @@ func (p *Pipeline) handleMetadata(ctx context.Context, t *asynq.Task) error {
 	if err != nil {
 		return err
 	}
-	// A complete NFO skips metadata lookups, but episodes still need a provider still when no local thumb exists.
+	// A complete NFO skips metadata lookups, but episodes still need a provider-supplied still when no local thumb exists.
 	if len(w.Jobs) == 0 || hasJob(w, "images", "descriptions") {
 		if !(w.NFOComplete && !w.Force) || hasProviderLookupNeed(w) {
 			lib, err := p.Library(ctx, w.Item.LibraryID)
@@ -851,5 +851,3 @@ func firstNonZero(values ...int) int {
 	}
 	return 0
 }
-
-var _ = probe.New
