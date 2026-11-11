@@ -4,6 +4,7 @@ package providers
 
 import (
 	"context"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -127,9 +128,13 @@ func MergeMetadata(dst *models.Metadata, src models.Metadata) {
 	}
 	if len(dst.Cast) == 0 {
 		dst.Cast = src.Cast
+	} else {
+		mergePersonImages(dst.Cast, src.Cast)
 	}
 	if len(dst.Crew) == 0 {
 		dst.Crew = src.Crew
+	} else {
+		mergePersonImages(dst.Crew, src.Crew)
 	}
 	for source, rating := range src.Ratings {
 		if dst.Ratings == nil {
@@ -137,6 +142,33 @@ func MergeMetadata(dst *models.Metadata, src models.Metadata) {
 		}
 		if _, ok := dst.Ratings[source]; !ok {
 			dst.Ratings[source] = rating
+		}
+	}
+}
+
+func AllowedPersonImage(image string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(image))
+	if err != nil || parsed.Scheme != "https" || parsed.User != nil || len(image) > 500 {
+		return false
+	}
+	switch parsed.Hostname() {
+	case "image.tmdb.org", "artworks.thetvdb.com", "thetvdb.com", "www.thetvdb.com", "i.discogs.com":
+		return true
+	}
+	return false
+}
+
+func mergePersonImages(existing, incoming []models.Person) {
+	for index := range existing {
+		for _, candidate := range incoming {
+			if strings.TrimSpace(existing[index].Name) == "" || !strings.EqualFold(strings.TrimSpace(existing[index].Name), strings.TrimSpace(candidate.Name)) {
+				continue
+			}
+			for _, image := range []string{candidate.Image, candidate.FallbackImage} {
+				if AllowedPersonImage(image) && existing[index].FallbackImage == "" && image != existing[index].Image {
+					existing[index].FallbackImage = strings.TrimSpace(image)
+				}
+			}
 		}
 	}
 }

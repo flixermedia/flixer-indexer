@@ -41,6 +41,7 @@ type Reloader struct {
 	pluginMu    sync.RWMutex
 	pluginState []models.PluginRuntimeStatus
 	backend     map[string]models.PluginModule
+	streamer    map[string]models.PluginModule
 }
 
 // Reload fetches settings once and applies them. Concurrency is only touched
@@ -54,18 +55,32 @@ func (r *Reloader) Reload(ctx context.Context) error {
 	var extensions []providers.Provider
 	pluginState := make([]models.PluginRuntimeStatus, 0, len(s.Plugins))
 	backendModules := make(map[string]models.PluginModule)
+	streamerModules := make(map[string]models.PluginModule)
 	for _, plugin := range s.Plugins {
 		indexerTarget := supportsIndexerCapability(plugin.Capabilities)
 		backendTarget := plugin.BackendEntry != "" && supportsBackendCapability(plugin.Capabilities)
-		if !indexerTarget && !backendTarget {
+		streamerTarget := plugin.StreamerEntry != "" && supportsStreamerCapability(plugin.Capabilities)
+		if !indexerTarget && !backendTarget && !streamerTarget {
 			pluginState = append(pluginState, models.PluginRuntimeStatus{ID: plugin.ID, State: "error", Error: "no supported backend or indexer capability"})
 			continue
 		}
 		if r.PluginRunner == nil {
-			pluginState = append(pluginState, models.PluginRuntimeStatus{ID: plugin.ID, State: "error", Error: "WASI runtime is unavailable"})
+			targets := make(map[string]models.PluginTargetStatus)
+			if backendTarget {
+				targets["flixer"] = models.PluginTargetStatus{State: "error", Error: "WASI runtime is unavailable"}
+			}
+			if indexerTarget {
+				targets["flixer-indexer"] = models.PluginTargetStatus{State: "error", Error: "WASI runtime is unavailable"}
+			}
+			if streamerTarget {
+				targets["flixer-streamer"] = models.PluginTargetStatus{State: "error", Error: "WASI runtime is unavailable"}
+			}
+			pluginState = append(pluginState, models.PluginRuntimeStatus{ID: plugin.ID, State: "error", Error: "WASI runtime is unavailable", Targets: targets})
 			continue
 		}
 
+		targets := make(map[string]models.PluginTargetStatus)
+		registered := false
 		if backendTarget {
 			path, err := wasmplugin.ResolveModulePath(r.PluginsPath, plugin.ID, plugin.BackendEntry)
 			if err == nil {
@@ -73,27 +88,50 @@ func (r *Reloader) Reload(ctx context.Context) error {
 			}
 			if err != nil {
 				r.Log.Warn("skipping backend plugin", "plugin", plugin.ID, "error", err)
-				pluginState = append(pluginState, models.PluginRuntimeStatus{ID: plugin.ID, State: "error", Error: "backend module could not be loaded"})
-				continue
+				targets["flixer"] = models.PluginTargetStatus{State: "error", Error: "backend module could not be loaded"}
+			} else {
+				backendModules[plugin.ID] = plugin
+				targets["flixer"] = models.PluginTargetStatus{State: "registered"}
+				registered = true
 			}
-			backendModules[plugin.ID] = plugin
 		}
 
 		if indexerTarget {
-			provider, err := wasmplugin.New(r.PluginsPath, plugin, r.PluginRunner)
+			host, _ := r.Client.(wasmplugin.HostCaller)
+			provider, err := wasmplugin.New(r.PluginsPath, plugin, r.PluginRunner, host)
 			if err != nil {
 				r.Log.Warn("skipping indexer plugin", "plugin", plugin.ID, "error", err)
-				delete(backendModules, plugin.ID)
-				pluginState = append(pluginState, models.PluginRuntimeStatus{ID: plugin.ID, State: "error", Error: "indexer module could not be loaded"})
-				continue
+				targets["flixer-indexer"] = models.PluginTargetStatus{State: "error", Error: "indexer module could not be loaded"}
+			} else {
+				extensions = append(extensions, provider)
+				targets["flixer-indexer"] = models.PluginTargetStatus{State: "registered"}
+				registered = true
 			}
-			extensions = append(extensions, provider)
 		}
-		pluginState = append(pluginState, models.PluginRuntimeStatus{ID: plugin.ID, State: "registered"})
+		if streamerTarget {
+			path, err := wasmplugin.ResolveModulePath(r.PluginsPath, plugin.ID, plugin.StreamerEntry)
+			if err == nil {
+				err = r.PluginRunner.Validate(ctx, path)
+			}
+			if err != nil {
+				r.Log.Warn("skipping streamer plugin", "plugin", plugin.ID, "error", err)
+				targets["flixer-streamer"] = models.PluginTargetStatus{State: "error", Error: "streamer module could not be loaded"}
+			} else {
+				streamerModules[plugin.ID] = plugin
+				targets["flixer-streamer"] = models.PluginTargetStatus{State: "registered"}
+				registered = true
+			}
+		}
+		state := "error"
+		if registered {
+			state = "registered"
+		}
+		pluginState = append(pluginState, models.PluginRuntimeStatus{ID: plugin.ID, State: state, Targets: targets})
 	}
 	r.pluginMu.Lock()
 	r.pluginState = pluginState
 	r.backend = backendModules
+	r.streamer = streamerModules
 	r.pluginMu.Unlock()
 	reg := registry.Build(s, r.EnvKeys, r.UA, r.Language, extensions...)
 	r.Pipeline.SetRegistry(reg)
@@ -133,6 +171,16 @@ func (r *Reloader) Reload(ctx context.Context) error {
 	return nil
 }
 
+func supportsStreamerCapability(capabilities []string) bool {
+	for _, capability := range capabilities {
+		switch capability {
+		case "streamer.playback.authorize", "streamer.manifest", "streamer.processing":
+			return true
+		}
+	}
+	return false
+}
+
 func supportsIndexerCapability(capabilities []string) bool {
 	for _, capability := range capabilities {
 		switch capability {
@@ -145,7 +193,7 @@ func supportsIndexerCapability(capabilities []string) bool {
 
 func supportsBackendCapability(capabilities []string) bool {
 	for _, capability := range capabilities {
-		if capability == "api.routes" || capability == "backend.routes" {
+		if capability == "api.routes" || capability == "backend.routes" || capability == "auth.directory" || capability == "auth.oidc" || capability == "auth.oauth" {
 			return true
 		}
 	}
@@ -154,8 +202,18 @@ func supportsBackendCapability(capabilities []string) bool {
 
 // InvokePlugin executes an enabled backend route module in the constrained WASI runtime.
 func (r *Reloader) InvokePlugin(ctx context.Context, pluginID string, input []byte) ([]byte, error) {
+	return r.InvokePluginTarget(ctx, pluginID, "flixer", input)
+}
+
+func (r *Reloader) InvokePluginTarget(ctx context.Context, pluginID, target string, input []byte) ([]byte, error) {
 	r.pluginMu.RLock()
-	module, ok := r.backend[pluginID]
+	var module models.PluginModule
+	var ok bool
+	if target == "flixer" {
+		module, ok = r.backend[pluginID]
+	} else if target == "flixer-streamer" {
+		module, ok = r.streamer[pluginID]
+	}
 	r.pluginMu.RUnlock()
 	if !ok {
 		return nil, errors.New("backend plugin is not registered")
@@ -163,7 +221,11 @@ func (r *Reloader) InvokePlugin(ctx context.Context, pluginID string, input []by
 	if r.PluginRunner == nil {
 		return nil, errors.New("WASI runtime is unavailable")
 	}
-	path, err := wasmplugin.ResolveModulePath(r.PluginsPath, module.ID, module.BackendEntry)
+	entry := module.BackendEntry
+	if target == "flixer-streamer" {
+		entry = module.StreamerEntry
+	}
+	path, err := wasmplugin.ResolveModulePath(r.PluginsPath, module.ID, entry)
 	if err != nil {
 		return nil, err
 	}

@@ -60,6 +60,16 @@ func TestManualAndUnrestrictedResultsHaveSeparateCacheEntries(t *testing.T) {
 	}
 }
 
+func TestClonePersonCreditsAreIndependent(t *testing.T) {
+	original := &providers.Result{Meta: models.Metadata{Cast: []models.Person{{Name: "Actor"}}, Crew: []models.Person{{Name: "Director"}}}}
+	copy := clone(original)
+	copy.Meta.Cast[0].FallbackImage = "https://image.tmdb.org/actor.jpg"
+	copy.Meta.Crew[0].FallbackImage = "https://image.tmdb.org/director.jpg"
+	if original.Meta.Cast[0].FallbackImage != "" || original.Meta.Crew[0].FallbackImage != "" {
+		t.Fatal("editing a result changed cached person credits")
+	}
+}
+
 func (p *testExtension) Name() string { return "flixer.test-plugin" }
 
 func (p *testExtension) Supports(capability string) bool { return p.capabilities[capability] }
@@ -88,5 +98,17 @@ func TestBuildRegistersExtensionOnlyForDeclaredCapability(t *testing.T) {
 	result, err = registry.Movie(context.Background(), providers.Query{Title: "No movie capability"})
 	if err != nil || result != nil || unsupported.calls != 0 {
 		t.Fatalf("undeclared capability was invoked: result=%#v err=%v calls=%d", result, err, unsupported.calls)
+	}
+}
+
+func TestReplacementCapabilityChangesOnlyItsProviderOrder(t *testing.T) {
+	first := &testExtension{capabilities: map[string]bool{"indexer.provider.movie": true}}
+	override := &testExtension{capabilities: map[string]bool{"indexer.provider.movie": true, "indexer.provider.movie.replace": true}}
+	reg := Build(models.Settings{}, nil, "test", "en", first, override)
+	if len(reg.movie) != 2 || reg.movie[0] != override || reg.movie[1] != first {
+		t.Fatalf("unexpected provider order: %+v", reg.movie)
+	}
+	if len(reg.series) != 0 {
+		t.Fatal("movie override must not register another provider type")
 	}
 }

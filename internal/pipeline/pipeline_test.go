@@ -36,6 +36,21 @@ type fakeAPI struct {
 	manualMatches         map[string]map[string]string
 }
 
+func TestNeedsPersonPhotoLookup(t *testing.T) {
+	item := models.Item{Type: models.ItemSeries, Metadata: models.Metadata{Cast: []models.Person{{Name: "Actor", Image: "/old/actor.jpg"}}}}
+	if !needsPersonPhotoLookup(item) {
+		t.Fatal("an NFO photo without a fallback should trigger provider lookup")
+	}
+	item.Metadata.Cast[0].Image = "https://image.tmdb.org/t/p/original/actor.jpg"
+	if !needsPersonPhotoLookup(item) {
+		t.Fatal("a remote photo without a fallback should trigger provider lookup")
+	}
+	item.Metadata.Cast[0].FallbackImage = "https://artworks.thetvdb.com/actor.jpg"
+	if needsPersonPhotoLookup(item) {
+		t.Fatal("an existing fallback should not trigger another lookup")
+	}
+}
+
 func (f *fakeAPI) PruneLibrary(_ context.Context, libraryID, _ string) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

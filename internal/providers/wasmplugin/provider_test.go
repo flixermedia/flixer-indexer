@@ -26,6 +26,62 @@ type validatingExecutorStub struct {
 	err error
 }
 
+type continuationExecutor struct {
+	requests []pluginRequest
+	outputs  [][]byte
+}
+
+func (e *continuationExecutor) Run(_ context.Context, _ string, input []byte) ([]byte, error) {
+	var request pluginRequest
+	if err := json.Unmarshal(input, &request); err != nil {
+		return nil, err
+	}
+	e.requests = append(e.requests, request)
+	output := e.outputs[0]
+	e.outputs = e.outputs[1:]
+	return output, nil
+}
+
+type hostStub struct {
+	pluginID string
+	calls    []json.RawMessage
+}
+
+func (host *hostStub) CallPluginHost(_ context.Context, pluginID string, calls []json.RawMessage) ([]json.RawMessage, error) {
+	host.pluginID, host.calls = pluginID, calls
+	return []json.RawMessage{json.RawMessage(`{"id":"lookup","ok":true,"body":"example"}`)}, nil
+}
+
+func TestProviderResumesAfterHostCalls(t *testing.T) {
+	executor := &continuationExecutor{outputs: [][]byte{
+		[]byte(`{"hostCalls":[{"id":"lookup","op":"http.get","url":"https://api.example.com"}],"continuation":{"stage":1}}`),
+		[]byte(`{"result":{"meta":{"title":"Resolved"}}}`),
+	}}
+	host := &hostStub{}
+	provider, err := New(makePlugin(t), models.PluginModule{ID: "flixer.example", Entry: "provider.wasm"}, executor, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := provider.Movie(context.Background(), providers.Query{Title: "Example"})
+	if err != nil || result == nil || result.Meta.Title != "Resolved" {
+		t.Fatalf("provider result = %+v, %v", result, err)
+	}
+	if host.pluginID != "flixer.example" || len(host.calls) != 1 || len(executor.requests) != 2 || string(executor.requests[1].Continuation) != `{"stage":1}` || len(executor.requests[1].HostResults) != 1 {
+		t.Fatalf("unexpected host continuation: host=%+v requests=%+v", host, executor.requests)
+	}
+}
+
+func TestProviderRejectsHostCallsWithoutBroker(t *testing.T) {
+	executor := &executorStub{output: []byte(`{"hostCalls":[{"id":"lookup","op":"http.get"}]}`)}
+	provider, err := New(makePlugin(t), models.PluginModule{ID: "flixer.example", Entry: "provider.wasm"}, executor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.Movie(context.Background(), providers.Query{}); err == nil {
+		t.Fatal("expected host calls to fail without a broker")
+	}
+}
+
 func (e *validatingExecutorStub) Validate(context.Context, string) error { return e.err }
 
 func (e *executorStub) Run(_ context.Context, path string, input []byte) ([]byte, error) {

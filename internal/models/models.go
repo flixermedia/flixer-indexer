@@ -107,16 +107,23 @@ type Settings struct {
 
 // PluginModule contains the enabled WASI entry points shared by Flixer at DATA_PATH/plugins/installed.
 type PluginModule struct {
-	ID           string   `json:"id"`
-	Version      string   `json:"version"`
-	Entry        string   `json:"entry"`
-	BackendEntry string   `json:"backendEntry,omitempty"`
-	Capabilities []string `json:"capabilities,omitempty"`
+	ID            string   `json:"id"`
+	Version       string   `json:"version"`
+	Entry         string   `json:"entry"`
+	BackendEntry  string   `json:"backendEntry,omitempty"`
+	StreamerEntry string   `json:"streamerEntry,omitempty"`
+	Capabilities  []string `json:"capabilities,omitempty"`
 }
 
 // PluginRuntimeStatus is the indexer's last settings-reload result for one module.
 type PluginRuntimeStatus struct {
-	ID    string `json:"id"`
+	ID      string                        `json:"id"`
+	State   string                        `json:"state"`
+	Error   string                        `json:"error,omitempty"`
+	Targets map[string]PluginTargetStatus `json:"targets,omitempty"`
+}
+
+type PluginTargetStatus struct {
 	State string `json:"state"`
 	Error string `json:"error,omitempty"`
 }
@@ -128,11 +135,12 @@ type ThemeSettings struct {
 
 // Person is a cast or crew member.
 type Person struct {
-	Name  string `json:"name"`
-	Type  string `json:"type"` // actor, director, writer, producer, composer, ...
-	Role  string `json:"role,omitempty"`
-	Order int    `json:"order,omitempty"`
-	Image string `json:"image,omitempty"`
+	Name          string `json:"name"`
+	Type          string `json:"type"` // actor, director, writer, producer, composer, ...
+	Role          string `json:"role,omitempty"`
+	Order         int    `json:"order,omitempty"`
+	Image         string `json:"image,omitempty"`
+	FallbackImage string `json:"fallbackImage,omitempty"`
 }
 
 // Metadata is the descriptive information about an item.

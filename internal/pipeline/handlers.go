@@ -491,7 +491,7 @@ func (p *Pipeline) handleMetadata(ctx context.Context, t *asynq.Task) error {
 	}
 	// A complete NFO skips metadata lookups, but episodes still need a provider-supplied still when no local thumb exists.
 	if len(w.Jobs) == 0 || hasJob(w, "images", "descriptions") {
-		if !(w.NFOComplete && !w.Force) || hasProviderLookupNeed(w) {
+		if !(w.NFOComplete && !w.Force) || hasProviderLookupNeed(w) || (w.NFOComplete && needsPersonPhotoLookup(w.Item)) {
 			lib, err := p.Library(ctx, w.Item.LibraryID)
 			if err != nil {
 				return err
@@ -515,6 +515,20 @@ func (p *Pipeline) handleMetadata(ctx context.Context, t *asynq.Task) error {
 
 func hasProviderLookupNeed(w models.Work) bool {
 	return hasJob(w, "images", "descriptions")
+}
+
+func needsPersonPhotoLookup(item models.Item) bool {
+	if item.Type != models.ItemMovie && item.Type != models.ItemSeries {
+		return false
+	}
+	for _, people := range [][]models.Person{item.Metadata.Cast, item.Metadata.Crew} {
+		for _, person := range people {
+			if strings.TrimSpace(person.Name) != "" && !providers.AllowedPersonImage(person.FallbackImage) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func needsProviderArtwork(item models.Item) bool {

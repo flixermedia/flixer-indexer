@@ -133,6 +133,17 @@ func (c *Client) Settings(ctx context.Context) (models.Settings, error) {
 	return settings, err
 }
 
+func (c *Client) CallPluginHost(ctx context.Context, pluginID string, calls []json.RawMessage) ([]json.RawMessage, error) {
+	var body struct {
+		Results []json.RawMessage `json:"results"`
+	}
+	path := "/api/indexer/plugins/" + url.PathEscape(pluginID) + "/host-calls"
+	err := c.do(ctx, http.MethodPost, path, struct {
+		Calls []json.RawMessage `json:"calls"`
+	}{Calls: calls}, &body)
+	return body.Results, err
+}
+
 func (c *Client) ManualMatch(ctx context.Context, libraryID, itemType, path string) (map[string]string, error) {
 	var out struct {
 		ProviderIDs map[string]string `json:"providerIds"`

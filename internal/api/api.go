@@ -104,6 +104,7 @@ func (s *Server) invokePlugin(w http.ResponseWriter, r *http.Request) {
 	}
 	var request struct {
 		PluginID string          `json:"pluginId"`
+		Target   string          `json:"target,omitempty"`
 		Input    json.RawMessage `json:"input"`
 	}
 	if !decode(w, r, &request) {
@@ -115,7 +116,10 @@ func (s *Server) invokePlugin(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-	output, err := s.Reloader.InvokePlugin(ctx, request.PluginID, request.Input)
+	if request.Target == "" {
+		request.Target = "flixer"
+	}
+	output, err := s.Reloader.InvokePluginTarget(ctx, request.PluginID, request.Target, request.Input)
 	if err != nil {
 		s.Log.Warn("backend plugin invocation failed", "plugin", request.PluginID, "error", err)
 		writeError(w, http.StatusBadGateway, "plugin invocation failed")

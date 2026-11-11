@@ -17,11 +17,16 @@ import (
 )
 
 const pluginAPIVersion = 1
+const maxHostRounds = 4
 
 var pluginIDPattern = regexp.MustCompile(`^[a-z0-9]+(?:[.-][a-z0-9]+)*$`)
 
 type Executor interface {
 	Run(context.Context, string, []byte) ([]byte, error)
+}
+
+type HostCaller interface {
+	CallPluginHost(context.Context, string, []json.RawMessage) ([]json.RawMessage, error)
 }
 
 type moduleValidator interface {
@@ -33,29 +38,34 @@ type Provider struct {
 	path         string
 	capabilities map[string]bool
 	executor     Executor
+	host         HostCaller
 }
 
 type pluginRequest struct {
-	APIVersion int               `json:"apiVersion"`
-	Method     string            `json:"method"`
-	Query      *providers.Query  `json:"query,omitempty"`
-	IDs        map[string]string `json:"ids,omitempty"`
-	Season     int               `json:"season,omitempty"`
-	Episode    int               `json:"episode,omitempty"`
-	Kind       string            `json:"kind,omitempty"`
-	ItemSeason *int              `json:"itemSeason,omitempty"`
-	Language   string            `json:"language,omitempty"`
+	APIVersion   int               `json:"apiVersion"`
+	Method       string            `json:"method"`
+	Query        *providers.Query  `json:"query,omitempty"`
+	IDs          map[string]string `json:"ids,omitempty"`
+	Season       int               `json:"season,omitempty"`
+	Episode      int               `json:"episode,omitempty"`
+	Kind         string            `json:"kind,omitempty"`
+	ItemSeason   *int              `json:"itemSeason,omitempty"`
+	Language     string            `json:"language,omitempty"`
+	Continuation json.RawMessage   `json:"continuation,omitempty"`
+	HostResults  []json.RawMessage `json:"hostResults,omitempty"`
 }
 
 type pluginResponse struct {
-	Result json.RawMessage `json:"result"`
-	Error  *struct {
+	Result       json.RawMessage `json:"result"`
+	HostCalls    json.RawMessage `json:"hostCalls"`
+	Continuation json.RawMessage `json:"continuation"`
+	Error        *struct {
 		Code    string `json:"code"`
 		Message string `json:"message"`
 	} `json:"error"`
 }
 
-func New(root string, module models.PluginModule, executor Executor) (*Provider, error) {
+func New(root string, module models.PluginModule, executor Executor, host ...HostCaller) (*Provider, error) {
 	if executor == nil {
 		return nil, errors.New("plugin executor is not configured")
 	}
@@ -74,7 +84,11 @@ func New(root string, module models.PluginModule, executor Executor) (*Provider,
 	for _, capability := range module.Capabilities {
 		capabilities[capability] = true
 	}
-	return &Provider{id: module.ID, path: path, capabilities: capabilities, executor: executor}, nil
+	var caller HostCaller
+	if len(host) > 0 {
+		caller = host[0]
+	}
+	return &Provider{id: module.ID, path: path, capabilities: capabilities, executor: executor, host: caller}, nil
 }
 
 func ResolveModulePath(root, pluginID, entry string) (string, error) {
@@ -156,29 +170,48 @@ func (p *Provider) lookup(
 
 func (p *Provider) call(ctx context.Context, request pluginRequest) (json.RawMessage, error) {
 	request.APIVersion = pluginAPIVersion
-	input, err := json.Marshal(request)
-	if err != nil {
-		return nil, err
-	}
-	output, err := p.executor.Run(ctx, p.path, input)
-	if err != nil {
-		return nil, fmt.Errorf("plugin %s failed: %w", p.id, err)
-	}
-	var response pluginResponse
-	if err := json.Unmarshal(output, &response); err != nil {
-		return nil, fmt.Errorf("plugin %s returned invalid JSON: %w", p.id, err)
-	}
-	if response.Error != nil {
-		if response.Error.Code == "not_found" {
-			return nil, httpx.ErrNotFound
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	for round := 0; ; round++ {
+		input, err := json.Marshal(request)
+		if err != nil {
+			return nil, err
 		}
-		code := response.Error.Code
-		if len(code) > 64 {
-			code = code[:64]
+		output, err := p.executor.Run(ctx, p.path, input)
+		if err != nil {
+			return nil, fmt.Errorf("plugin %s failed: %w", p.id, err)
 		}
-		return nil, fmt.Errorf("plugin %s returned error code %q", p.id, code)
+		var response pluginResponse
+		if err := json.Unmarshal(output, &response); err != nil {
+			return nil, fmt.Errorf("plugin %s returned invalid JSON: %w", p.id, err)
+		}
+		if response.Error != nil {
+			if response.Error.Code == "not_found" {
+				return nil, httpx.ErrNotFound
+			}
+			code := response.Error.Code
+			if len(code) > 64 {
+				code = code[:64]
+			}
+			return nil, fmt.Errorf("plugin %s returned error code %q", p.id, code)
+		}
+		if len(response.HostCalls) == 0 {
+			return response.Result, nil
+		}
+		if round >= maxHostRounds || p.host == nil {
+			return nil, fmt.Errorf("plugin %s cannot complete host calls", p.id)
+		}
+		var calls []json.RawMessage
+		if err := json.Unmarshal(response.HostCalls, &calls); err != nil || len(calls) == 0 || len(calls) > 8 {
+			return nil, fmt.Errorf("plugin %s returned invalid host calls", p.id)
+		}
+		results, err := p.host.CallPluginHost(ctx, p.id, calls)
+		if err != nil {
+			return nil, fmt.Errorf("plugin %s host calls failed", p.id)
+		}
+		request.Continuation = response.Continuation
+		request.HostResults = results
 	}
-	return response.Result, nil
 }
 
 var _ providers.MovieProvider = (*Provider)(nil)

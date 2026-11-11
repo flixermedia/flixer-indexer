@@ -111,6 +111,25 @@ func TestManualMatch(t *testing.T) {
 	}
 }
 
+func TestPluginHostCallsAreSigned(t *testing.T) {
+	client := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/indexer/plugins/flixer.example/host-calls" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		var body struct {
+			Calls []json.RawMessage `json:"calls"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.Calls) != 1 {
+			t.Fatalf("unexpected calls: %+v, %v", body, err)
+		}
+		_, _ = w.Write([]byte(`{"results":[{"id":"one","ok":true}]}`))
+	})
+	results, err := client.CallPluginHost(context.Background(), "flixer.example", []json.RawMessage{json.RawMessage(`{"id":"one","op":"http.get"}`)})
+	if err != nil || len(results) != 1 || string(results[0]) != `{"id":"one","ok":true}` {
+		t.Fatalf("unexpected host results: %s, %v", results, err)
+	}
+}
+
 func TestUpsertItemLyrics(t *testing.T) {
 	c := serve(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != lyricsPath+"track-1/lyrics" {

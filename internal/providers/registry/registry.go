@@ -176,7 +176,29 @@ func Build(settings models.Settings, envKeys map[string]string, userAgent, defau
 			r.images = append(r.images, provider)
 		}
 	}
+	sortProviders(r.movie, "indexer.provider.movie.replace")
+	sortProviders(r.series, "indexer.provider.series.replace")
+	sortProviders(r.season, "indexer.provider.season.replace")
+	sortProviders(r.episode, "indexer.provider.episode.replace")
+	sortProviders(r.album, "indexer.provider.album.replace")
+	sortProviders(r.images, "indexer.provider.images.replace")
 	return r
+}
+
+func sortProviders[T providers.Provider](list []T, capability string) {
+	slices.SortStableFunc(list, func(left, right T) int {
+		priority := func(provider providers.Provider) bool {
+			declared, ok := provider.(capabilityProvider)
+			return ok && declared.Supports(capability)
+		}
+		if priority(left) && !priority(right) {
+			return -1
+		}
+		if !priority(left) && priority(right) {
+			return 1
+		}
+		return 0
+	})
 }
 
 func supports(provider providers.Provider, capability string) bool {
@@ -453,6 +475,8 @@ func clone(r *providers.Result) *providers.Result {
 		Meta:   r.Meta,
 		Images: append([]models.Image(nil), r.Images...),
 	}
+	out.Meta.Cast = append([]models.Person(nil), r.Meta.Cast...)
+	out.Meta.Crew = append([]models.Person(nil), r.Meta.Crew...)
 	if r.Meta.Ratings != nil {
 		out.Meta.Ratings = make(map[string]float64, len(r.Meta.Ratings))
 		for k, v := range r.Meta.Ratings {
