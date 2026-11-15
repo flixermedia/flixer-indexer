@@ -69,6 +69,30 @@ func (t *Tracker) Discovered(ctx context.Context, libraryID, scanID string) erro
 	return t.rdb.Eval(ctx, script, []string{key(libraryID)}, scanID).Err()
 }
 
+func (t *Tracker) Skipped(ctx context.Context, libraryID, scanID string, itemIDs []string) error {
+	if scanID == "" || len(itemIDs) == 0 {
+		return nil
+	}
+	script := `
+		if redis.call("HGET", KEYS[1], "scanId") ~= ARGV[1] then return 0 end
+		local skipped = 0
+		for i = 2, #ARGV do
+			if redis.call("HSETNX", KEYS[1], "item:" .. ARGV[i], "done") == 1 then
+				redis.call("HINCRBY", KEYS[1], "discovered", 1)
+				redis.call("HINCRBY", KEYS[1], "done", 1)
+				skipped = skipped + 1
+			end
+		end
+		` + settleScript + `
+		return skipped`
+	args := make([]any, 1, len(itemIDs)+1)
+	args[0] = scanID
+	for _, itemID := range itemIDs {
+		args = append(args, itemID)
+	}
+	return t.rdb.Eval(ctx, script, []string{key(libraryID)}, args...).Err()
+}
+
 func (t *Tracker) Done(ctx context.Context, libraryID, scanID, itemID string) error {
 	return t.finish(ctx, libraryID, scanID, itemID, "done")
 }

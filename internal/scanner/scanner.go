@@ -162,7 +162,7 @@ func (s *scan) base(typ, path string) models.Item {
 		item.RelativePath = strings.Trim(filepath.ToSlash(filepath.Join(s.folder.Path, rel)), "/.")
 	}
 	if info, err := os.Stat(path); err == nil {
-		item.ModifiedAt = info.ModTime().UTC().Format(time.RFC3339)
+		item.ModifiedAt = info.ModTime().UTC().Format(time.RFC3339Nano)
 		if !info.IsDir() {
 			item.SizeBytes = info.Size()
 		}

@@ -2,10 +2,13 @@ package pipeline
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -34,6 +37,9 @@ type fakeAPI struct {
 	existingIntroSegments models.ExistingIntroSegments
 	removedTargets        []models.PathRemoval
 	manualMatches         map[string]map[string]string
+	scanStates            []models.ScanState
+	scanStateCalls        int
+	seen                  []string
 }
 
 func TestNeedsPersonPhotoLookup(t *testing.T) {
@@ -95,6 +101,16 @@ func (f *fakeAPI) UpsertItem(_ context.Context, item models.Item) (string, error
 	defer f.mu.Unlock()
 	f.got = append(f.got, item)
 	return "id", nil
+}
+func (f *fakeAPI) ScanState(context.Context, string, string, int) ([]models.ScanState, error) {
+	f.scanStateCalls++
+	return f.scanStates, nil
+}
+func (f *fakeAPI) MarkScanItemsSeen(_ context.Context, _ string, itemIDs []string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.seen = append(f.seen, itemIDs...)
+	return nil
 }
 
 func TestIdentifyUsesManualSeriesMatchInsteadOfNFO(t *testing.T) {
@@ -344,6 +360,240 @@ func TestFailedLibraryWalkCannotPrune(t *testing.T) {
 	}
 	if len(api.pruned) != 0 {
 		t.Fatalf("failed scan pruned libraries: %v", api.pruned)
+	}
+}
+
+func TestFullScanSkipsUnchangedItemsAndKeepsThemSeen(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "Movie.mkv")
+	if err := os.WriteFile(path, []byte("movie"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	size := info.Size()
+	api := &fakeAPI{
+		libs:       []models.Library{{ID: "lib", Type: models.LibraryMovies, Folders: []models.Folder{{AbsolutePath: root}}}},
+		scanStates: []models.ScanState{{ID: "item-id", Path: path, SizeBytes: &size, ModifiedAt: info.ModTime().UTC().Format(time.RFC3339Nano), MatchConfidence: models.MatchConfidenceHigh}},
+	}
+	mr := miniredis.RunT(t)
+	queue := asynq.NewClient(asynq.RedisClientOpt{Addr: mr.Addr()})
+	defer queue.Close()
+	tracker := progress.New(redis.NewClient(&redis.Options{Addr: mr.Addr()}))
+	p := New(api, images.NewStore(t.TempDir(), "ffmpeg", "test"), fakeProbe{}, tracker, queue, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	payload, err := json.Marshal(models.ScanRequest{LibraryID: "lib"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.handleScan(context.Background(), asynq.NewTask(TypeScan, payload)); err != nil {
+		t.Fatal(err)
+	}
+	scan, err := tracker.Get(context.Background(), "lib")
+	if err != nil || scan == nil || scan.State != progress.StateComplete || scan.Discovered != 1 || scan.Done != 1 {
+		t.Fatalf("unchanged scan progress = %+v, %v", scan, err)
+	}
+	if len(api.seen) != 1 || api.seen[0] != "item-id" {
+		t.Fatalf("unchanged item was not marked seen: %v", api.seen)
+	}
+	if len(api.pruned) != 1 {
+		t.Fatalf("full scan did not retain its normal prune step: %v", api.pruned)
+	}
+}
+
+func TestForcedFullScanDoesNotLoadOrSkipPersistedState(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "Movie.mkv")
+	if err := os.WriteFile(path, []byte("movie"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	size := info.Size()
+	api := &fakeAPI{
+		libs:       []models.Library{{ID: "lib", Type: models.LibraryMovies, Folders: []models.Folder{{AbsolutePath: root}}}},
+		scanStates: []models.ScanState{{ID: "item-id", Path: path, SizeBytes: &size, ModifiedAt: info.ModTime().UTC().Format(time.RFC3339Nano), MatchConfidence: models.MatchConfidenceHigh}},
+	}
+	mr := miniredis.RunT(t)
+	queue := asynq.NewClient(asynq.RedisClientOpt{Addr: mr.Addr()})
+	defer queue.Close()
+	tracker := progress.New(redis.NewClient(&redis.Options{Addr: mr.Addr()}))
+	p := New(api, images.NewStore(t.TempDir(), "ffmpeg", "test"), fakeProbe{}, tracker, queue, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	payload, err := json.Marshal(models.ScanRequest{LibraryID: "lib", Force: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.handleScan(context.Background(), asynq.NewTask(TypeScan, payload)); err != nil {
+		t.Fatal(err)
+	}
+	scan, err := tracker.Get(context.Background(), "lib")
+	if err != nil || scan == nil || scan.Discovered != 1 || scan.Done != 0 {
+		t.Fatalf("forced scan progress = %+v, %v", scan, err)
+	}
+	if api.scanStateCalls != 0 || len(api.seen) != 0 {
+		t.Fatalf("forced scan used incremental state: calls=%d seen=%v", api.scanStateCalls, api.seen)
+	}
+}
+
+func TestSameScanStateRequiresExactStatsAndNoSidecars(t *testing.T) {
+	size := int64(10)
+	state := models.ScanState{ID: "item", SizeBytes: &size, ModifiedAt: "2026-01-01T00:00:00.123Z", MatchConfidence: models.MatchConfidenceHigh}
+	item := models.Item{SizeBytes: 10, ModifiedAt: "2026-01-01T00:00:00.123456Z"}
+	if !sameScanState(state, item) {
+		t.Fatal("equal persisted millisecond stats should be unchanged")
+	}
+	item.SizeBytes++
+	if sameScanState(state, item) {
+		t.Fatal("size changes must trigger reprocessing")
+	}
+	item.SizeBytes = size
+	item.ModifiedAt = "2026-01-01T00:00:01.123Z"
+	if sameScanState(state, item) {
+		t.Fatal("modification time changes must trigger reprocessing")
+	}
+	item.ModifiedAt = "2026-01-01T00:00:00.123Z"
+	item.NFOPresent = true
+	if sameScanState(state, item) {
+		t.Fatal("NFO sidecars must trigger reprocessing")
+	}
+	item.NFOPresent = false
+	item.LocalImagesUsed = true
+	if sameScanState(state, item) {
+		t.Fatal("local artwork sidecars must trigger reprocessing")
+	}
+}
+
+func TestAssessMatchUsesEvidenceAcrossMediaTypes(t *testing.T) {
+	year := 2001
+	season, episode := 1, 2
+	tests := []struct {
+		name        string
+		work        models.Work
+		explicitIDs map[string]string
+		result      *providers.Result
+		confidence  string
+		evidence    string
+	}{
+		{
+			name:        "confirmed explicit ID",
+			work:        models.Work{Item: models.Item{Type: models.ItemMovie, ProviderIDs: map[string]string{"tmdb": "42"}}},
+			explicitIDs: map[string]string{"tmdb": "42"},
+			result:      &providers.Result{IDs: map[string]string{"tmdb": "42"}},
+			confidence:  models.MatchConfidenceHigh, evidence: "provider_id_confirmed",
+		},
+		{
+			name:       "exact title and year",
+			work:       models.Work{Item: models.Item{Type: models.ItemMovie}, Hints: models.Hints{Title: "The Matrix", Year: year}},
+			result:     &providers.Result{IDs: map[string]string{"tmdb": "42"}, Meta: models.Metadata{Title: "The Matrix", Year: year}},
+			confidence: models.MatchConfidenceHigh, evidence: "title_year_match",
+		},
+		{
+			name:       "title without year evidence",
+			work:       models.Work{Item: models.Item{Type: models.ItemSeries}, Hints: models.Hints{Title: "The Matrix"}},
+			result:     &providers.Result{IDs: map[string]string{"tmdb": "42"}, Meta: models.Metadata{Title: "The Matrix"}},
+			confidence: models.MatchConfidenceMedium, evidence: "title_match_year_unknown",
+		},
+		{
+			name:       "conflicting year",
+			work:       models.Work{Item: models.Item{Type: models.ItemMovie}, Hints: models.Hints{Title: "The Matrix", Year: year}},
+			result:     &providers.Result{IDs: map[string]string{"tmdb": "42"}, Meta: models.Metadata{Title: "The Matrix", Year: year + 1}},
+			confidence: models.MatchConfidenceLow, evidence: "year_conflict",
+		},
+		{
+			name:       "conflicting title",
+			work:       models.Work{Item: models.Item{Type: models.ItemMovie}, Hints: models.Hints{Title: "The Matrix", Year: year}},
+			result:     &providers.Result{IDs: map[string]string{"tmdb": "42"}, Meta: models.Metadata{Title: "Another Movie", Year: year}},
+			confidence: models.MatchConfidenceLow, evidence: "title_conflict",
+		},
+		{
+			name:       "episode resolved from series coordinates",
+			work:       models.Work{Item: models.Item{Type: models.ItemEpisode, SeasonNumber: &season, EpisodeNumber: &episode}, Hints: models.Hints{SeriesIDs: map[string]string{"tvdb": "99"}}},
+			result:     &providers.Result{IDs: map[string]string{"tvdb": "99", "tmdb": "42"}},
+			confidence: models.MatchConfidenceHigh, evidence: "series_episode_coordinates",
+		},
+		{
+			name:       "album and artist match",
+			work:       models.Work{Item: models.Item{Type: models.ItemAlbum}, Hints: models.Hints{Album: "Discovery", Artist: "Daft Punk"}},
+			result:     &providers.Result{IDs: map[string]string{"musicbrainz": "release"}, Meta: models.Metadata{Album: "Discovery", Artist: "Daft Punk"}},
+			confidence: models.MatchConfidenceHigh, evidence: "album_artist_match",
+		},
+		{
+			name:       "track tags match artist album and title",
+			work:       models.Work{Item: models.Item{Type: models.ItemTrack, Metadata: models.Metadata{Artist: "Daft Punk", Album: "Discovery", Title: "One More Time"}}, Hints: models.Hints{Artist: "Daft Punk", Album: "Discovery", Title: "One More Time"}},
+			confidence: models.MatchConfidenceHigh, evidence: "track_tags_match",
+		},
+		{
+			name:       "track title conflict",
+			work:       models.Work{Item: models.Item{Type: models.ItemTrack, Metadata: models.Metadata{Artist: "Daft Punk", Album: "Discovery", Title: "Wrong Track"}}, Hints: models.Hints{Artist: "Daft Punk", Album: "Discovery", Title: "One More Time"}},
+			confidence: models.MatchConfidenceLow, evidence: "title_conflict",
+		},
+		{
+			name:       "unidentified item",
+			work:       models.Work{Item: models.Item{Type: models.ItemMovie}},
+			confidence: models.MatchConfidenceUnidentified, evidence: "no_provider_match",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			confidence, evidence := assessMatch(test.work, test.explicitIDs, test.result)
+			if confidence != test.confidence || evidence != test.evidence {
+				t.Fatalf("assessment = %q/%q, want %q/%q", confidence, evidence, test.confidence, test.evidence)
+			}
+		})
+	}
+}
+
+func TestHashScanPersistsExactMediaDigest(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "Movie.mkv")
+	content := []byte("exact duplicate bytes")
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	api := &fakeAPI{libs: []models.Library{{ID: "lib", Type: models.LibraryMovies, Folders: []models.Folder{{RootID: "root", AbsolutePath: root}}}}}
+	p := &Pipeline{Client: api, Log: slog.New(slog.NewTextHandler(os.Stderr, nil))}
+	work := models.Work{
+		Item: models.Item{LibraryID: "lib", Type: models.ItemMovie, Path: path, RootID: "root", RelativePath: "Movie.mkv", ProviderIDs: map[string]string{}, Metadata: models.Metadata{Title: "Movie"}},
+		Jobs: []string{"hashes"}, Untracked: true,
+	}
+	payload, err := json.Marshal(work)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.handleProbe(context.Background(), asynq.NewTask(TypeProbe, payload)); err != nil {
+		t.Fatal(err)
+	}
+	want := sha256.Sum256(content)
+	if len(api.got) != 1 || api.got[0].ContentHash != hex.EncodeToString(want[:]) || len(api.got[0].UpdateFields) != 1 || api.got[0].UpdateFields[0] != "hashes" {
+		t.Fatalf("hashed media update = %+v", api.got)
+	}
+}
+
+func TestWriteNFOCreatesSidecarOnlyInsideLibraryRoot(t *testing.T) {
+	root := t.TempDir()
+	mediaPath := filepath.Join(root, "Series", "Season 1", "Show S01E01.mkv")
+	if err := os.MkdirAll(filepath.Dir(mediaPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(mediaPath, []byte("video"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	api := &fakeAPI{libs: []models.Library{{ID: "lib", Type: models.LibraryTVShows, Folders: []models.Folder{{RootID: "root", AbsolutePath: root}}}}}
+	p := &Pipeline{Client: api}
+	request := models.NFOWriteRequest{LibraryID: "lib", ItemType: models.ItemEpisode, Path: mediaPath, Fields: map[string]string{"title": "Episode"}, ProviderIDs: map[string]string{"imdb": "tt1234567"}}
+	if err := p.WriteNFO(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	nfoPath := filepath.Join(filepath.Dir(mediaPath), strings.TrimSuffix(filepath.Base(mediaPath), filepath.Ext(mediaPath))+".nfo")
+	if _, err := os.Stat(nfoPath); err != nil {
+		t.Fatalf("expected sidecar %s: %v", nfoPath, err)
+	}
+	request.Path = filepath.Join(t.TempDir(), "outside.mkv")
+	if err := p.WriteNFO(context.Background(), request); err == nil {
+		t.Fatal("expected outside-library write rejection")
 	}
 }
 

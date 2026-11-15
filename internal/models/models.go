@@ -22,6 +22,14 @@ const (
 	ItemVideo   = "video"
 )
 
+const (
+	MatchConfidenceUnknown      = "unknown"
+	MatchConfidenceHigh         = "high"
+	MatchConfidenceMedium       = "medium"
+	MatchConfidenceLow          = "low"
+	MatchConfidenceUnidentified = "unidentified"
+)
+
 // Image storage policies.
 const (
 	StorageAlongside = "alongside"
@@ -70,6 +78,17 @@ type IntroSyncCandidate struct {
 	DurationMs  int64             `json:"durationMs,omitempty"`
 	Season      *int              `json:"season,omitempty"`
 	Episode     *int              `json:"episode,omitempty"`
+}
+
+// ScanState is the persisted file identity used to skip unchanged full-scan work.
+type ScanState struct {
+	ID              string `json:"id"`
+	Path            string `json:"path"`
+	SizeBytes       *int64 `json:"sizeBytes"`
+	ModifiedAt      string `json:"modifiedAt"`
+	NFOPresent      bool   `json:"nfoPresent"`
+	LocalImagesUsed bool   `json:"localImagesUsed"`
+	MatchConfidence string `json:"matchConfidence"`
 }
 
 // IntroTimeRange is one TheIntroDB timestamp, in milliseconds.
@@ -236,6 +255,9 @@ type Item struct {
 	EpisodeNumber     *int              `json:"episodeNumber,omitempty"`
 	EpisodeEnd        *int              `json:"episodeEndNumber,omitempty"`
 	ProviderIDs       map[string]string `json:"providerIds"`
+	MatchConfidence   string            `json:"matchConfidence,omitempty"`
+	MatchEvidence     string            `json:"matchEvidence,omitempty"`
+	ContentHash       string            `json:"contentHash,omitempty"`
 	Metadata          Metadata          `json:"metadata"`
 	Images            []Image           `json:"images"`
 	Technical         *Technical        `json:"technical,omitempty"`
@@ -306,4 +328,13 @@ type RefreshRequest struct {
 	ProviderIDs       map[string]string `json:"providerIds,omitempty"`
 	SeriesProviderIDs map[string]string `json:"seriesProviderIds,omitempty"`
 	Priority          bool              `json:"priority,omitempty"`
+}
+
+type NFOWriteRequest struct {
+	LibraryID        string            `json:"libraryId"`
+	ItemType         string            `json:"itemType"`
+	Path             string            `json:"path"`
+	Fields           map[string]string `json:"fields"`
+	ProviderIDs      map[string]string `json:"providerIds"`
+	ClearProviderIDs []string          `json:"clearProviderIds,omitempty"`
 }

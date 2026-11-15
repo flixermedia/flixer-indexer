@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/hibiken/asynq"
 
@@ -57,8 +58,29 @@ func (p *Pipeline) handleScan(ctx context.Context, t *asynq.Task) error {
 		return p.handleTrickplayScan(ctx, lib, scanID)
 	}
 	p.logger(ctx).Info("scan started", "library", lib.ID, "name", lib.Name, "type", lib.Type)
+	useScanState := fullLibraryScan && !req.Force && len(req.Jobs) == 0
+	indexed := map[string]models.ScanState{}
+	if useScanState {
+		indexed, err = p.indexedScanState(ctx, lib.ID)
+		if err != nil {
+			if tracked {
+				_ = p.Progress.WalkFailed(context.WithoutCancel(ctx), lib.ID, scanID, err)
+			}
+			return fmt.Errorf("load indexed scan state: %w", err)
+		}
+	}
+	unchangedIDs := make([]string, 0)
+	unchangedProgressIDs := make([]string, 0)
 
 	emit := func(w models.Work) error {
+		if len(req.Jobs) == 1 && req.Jobs[0] == "hashes" && !hashableItemType(w.Item.Type) {
+			return nil
+		}
+		if state, ok := indexed[w.Item.Path]; useScanState && ok && sameScanState(state, w.Item) {
+			unchangedIDs = append(unchangedIDs, state.ID)
+			unchangedProgressIDs = append(unchangedProgressIDs, progressItemID("skip", w.Item.Path))
+			return nil
+		}
 		w.Force = req.Force
 		w.Jobs = req.Jobs
 		w.Untracked = (len(req.Jobs) > 0 || !fullLibraryScan) && !req.TrackProgress
@@ -79,6 +101,18 @@ func (p *Pipeline) handleScan(ctx context.Context, t *asynq.Task) error {
 			if err = scanner.ScanFolderBranch(ctx, lib, path, emit); err != nil {
 				break
 			}
+		}
+	}
+	if err == nil && len(unchangedIDs) > 0 {
+		for start := 0; start < len(unchangedIDs); start += 500 {
+			end := min(start+500, len(unchangedIDs))
+			if err = p.Client.MarkScanItemsSeen(ctx, lib.ID, unchangedIDs[start:end]); err != nil {
+				break
+			}
+		}
+		for start := 0; err == nil && start < len(unchangedProgressIDs); start += 500 {
+			end := min(start+500, len(unchangedProgressIDs))
+			err = p.Progress.Skipped(ctx, lib.ID, scanID, unchangedProgressIDs[start:end])
 		}
 	}
 	if err != nil {
@@ -114,6 +148,42 @@ func (p *Pipeline) handleScan(ctx context.Context, t *asynq.Task) error {
 		p.pruneIfComplete(ctx, lib.ID, scanID)
 	}
 	return nil
+}
+
+func (p *Pipeline) indexedScanState(ctx context.Context, libraryID string) (map[string]models.ScanState, error) {
+	state := make(map[string]models.ScanState)
+	afterID := ""
+	for {
+		page, err := p.Client.ScanState(ctx, libraryID, afterID, 500)
+		if err != nil {
+			return nil, err
+		}
+		for _, item := range page {
+			state[item.Path] = item
+		}
+		if len(page) < 500 {
+			return state, nil
+		}
+		next := page[len(page)-1].ID
+		if next == "" || next == afterID {
+			return nil, errors.New("scan state pagination did not advance")
+		}
+		afterID = next
+	}
+}
+
+func sameScanState(state models.ScanState, item models.Item) bool {
+	if state.ID == "" || state.SizeBytes == nil || *state.SizeBytes != item.SizeBytes || state.ModifiedAt == "" || item.ModifiedAt == "" ||
+		state.NFOPresent || item.NFOPresent || state.LocalImagesUsed || item.LocalImagesUsed ||
+		state.MatchConfidence == "" || state.MatchConfidence == models.MatchConfidenceUnknown {
+		return false
+	}
+	previous, err := time.Parse(time.RFC3339Nano, state.ModifiedAt)
+	if err != nil {
+		return false
+	}
+	current, err := time.Parse(time.RFC3339Nano, item.ModifiedAt)
+	return err == nil && previous.UTC().Truncate(time.Millisecond).Equal(current.UTC().Truncate(time.Millisecond))
 }
 
 func (p *Pipeline) handleChange(ctx context.Context, t *asynq.Task) error {
@@ -155,7 +225,11 @@ func (p *Pipeline) handleChange(ctx context.Context, t *asynq.Task) error {
 }
 
 var supportedScanJobs = map[string]bool{
-	"images": true, "descriptions": true, "fileData": true, "lyrics": true,
+	"images": true, "descriptions": true, "fileData": true, "lyrics": true, "hashes": true,
+}
+
+func hashableItemType(itemType string) bool {
+	return itemType == models.ItemMovie || itemType == models.ItemEpisode || itemType == models.ItemVideo || itemType == models.ItemTrack
 }
 
 func validateScanJobs(jobs []string) error {
@@ -310,7 +384,7 @@ func isWithin(child, parent string) bool {
 }
 
 // nfoPath returns the first NFO file that exists for the item.
-func nfoPath(item models.Item, root string) string {
+func nfoCandidates(item models.Item, root string) []string {
 	dir := filepath.Dir(item.Path)
 	var candidates []string
 	switch item.Type {
@@ -321,14 +395,18 @@ func nfoPath(item models.Item, root string) string {
 	case models.ItemAlbum:
 		candidates = []string{filepath.Join(item.Path, "album.nfo")}
 	case models.ItemTrack:
-		return ""
+		return nil
 	default:
 		candidates = []string{filepath.Join(dir, naming.Base(item.Path)+".nfo")}
 		if item.Type == models.ItemMovie && !strings.EqualFold(filepath.Clean(dir), filepath.Clean(root)) {
 			candidates = append(candidates, filepath.Join(dir, "movie.nfo"))
 		}
 	}
-	for _, c := range candidates {
+	return candidates
+}
+
+func nfoPath(item models.Item, root string) string {
+	for _, c := range nfoCandidates(item, root) {
 		if st, err := os.Stat(c); err == nil && !st.IsDir() {
 			return c
 		}
@@ -546,6 +624,7 @@ func needsProviderArtwork(item models.Item) bool {
 func (p *Pipeline) lookup(ctx context.Context, reg *registry.Registry, w *models.Work) error {
 	item, h := &w.Item, w.Hints
 	query := providers.Query{Title: firstNonEmpty(item.Metadata.Title, h.Title), Year: firstNonZero(item.Metadata.Year, h.Year), IDs: item.ProviderIDs, RequireIDMatch: w.ManualMatch}
+	explicitIDs := providers.MergeIDs(nil, query.IDs)
 
 	var res *providers.Result
 	var err error
@@ -564,6 +643,7 @@ func (p *Pipeline) lookup(ctx context.Context, reg *registry.Registry, w *models
 			return serr
 		}
 		w.Hints.SeriesIDs = ids
+		explicitIDs = providers.MergeIDs(nil, ids)
 		if item.SeasonNumber == nil || len(ids) == 0 {
 			return nil
 		}
@@ -578,6 +658,7 @@ func (p *Pipeline) lookup(ctx context.Context, reg *registry.Registry, w *models
 	if err != nil {
 		return err
 	}
+	item.MatchConfidence, item.MatchEvidence = assessMatch(*w, explicitIDs, res)
 	if res == nil {
 		if w.ManualMatch && (item.Type == models.ItemMovie || item.Type == models.ItemSeries || item.Type == models.ItemAlbum) {
 			return fmt.Errorf("no metadata found for manual match of %s", item.Path)
@@ -721,6 +802,15 @@ func (p *Pipeline) handleProbe(ctx context.Context, t *asynq.Task) error {
 		return err
 	}
 	item := &w.Item
+	if item.MatchConfidence == "" || item.MatchConfidence == models.MatchConfidenceUnknown {
+		item.MatchConfidence, item.MatchEvidence = assessMatch(w, nil, nil)
+	}
+	if hasJob(w, "hashes") && hashableItemType(item.Type) {
+		item.ContentHash, err = hashFile(ctx, item.Path)
+		if err != nil {
+			return fmt.Errorf("hash media file %s: %w", item.Path, err)
+		}
+	}
 
 	if len(w.Jobs) == 0 || hasJob(w, "fileData", "lyrics") {
 		switch item.Type {

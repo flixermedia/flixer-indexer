@@ -54,6 +54,12 @@ func (s *Stub) ManualMatch(context.Context, string, string, string) (map[string]
 	return nil, nil
 }
 
+func (s *Stub) ScanState(context.Context, string, string, int) ([]models.ScanState, error) {
+	return nil, nil
+}
+
+func (s *Stub) MarkScanItemsSeen(context.Context, string, []string) error { return nil }
+
 func (s *Stub) PruneLibrary(context.Context, string, string) (int, error) { return 0, nil }
 
 func (s *Stub) DeleteItemsAtPaths(context.Context, string, []models.PathRemoval) (int, error) {

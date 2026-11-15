@@ -91,6 +91,35 @@ func TestUpsertItem(t *testing.T) {
 	}
 }
 
+func TestScanStateAndMarkSeen(t *testing.T) {
+	calls := 0
+	c := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if calls == 1 {
+			if r.URL.Path != scanStatePath || body["libraryId"] != "lib" || body["afterId"] != "cursor" || body["limit"] != float64(500) {
+				t.Fatalf("scan state request = %s %v", r.URL.Path, body)
+			}
+			_, _ = w.Write([]byte(`{"items":[{"id":"item","path":"/movie.mkv","sizeBytes":12,"modifiedAt":"2026-01-01T00:00:00Z"}]}`))
+			return
+		}
+		if r.URL.Path != scanSeenPath || body["libraryId"] != "lib" {
+			t.Fatalf("mark seen request = %s %v", r.URL.Path, body)
+		}
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	})
+	items, err := c.ScanState(context.Background(), "lib", "cursor", 500)
+	if err != nil || len(items) != 1 || items[0].SizeBytes == nil || *items[0].SizeBytes != 12 {
+		t.Fatalf("scan state = %+v, %v", items, err)
+	}
+	if err := c.MarkScanItemsSeen(context.Background(), "lib", []string{"item"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestManualMatch(t *testing.T) {
 	c := serve(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != manualMatchPath {

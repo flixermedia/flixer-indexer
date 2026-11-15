@@ -60,6 +60,7 @@ func (s *Server) Handler() http.Handler {
 	signed := http.NewServeMux()
 	signed.HandleFunc("POST /internal/scan", s.scan)
 	signed.HandleFunc("POST /internal/refresh", s.refresh)
+	signed.HandleFunc("POST /internal/nfo/write", s.writeNFO)
 	signed.HandleFunc("GET /internal/scans", s.scans)
 	signed.HandleFunc("GET /internal/stats", s.stats)
 	signed.HandleFunc("GET /internal/tasks", s.tasks)

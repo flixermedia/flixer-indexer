@@ -56,6 +56,28 @@ func TestEmptyLibraryCompletes(t *testing.T) {
 	}
 }
 
+func TestSkippedItemsCountAsDiscoveredAndDone(t *testing.T) {
+	mr := miniredis.RunT(t)
+	tr := New(redis.NewClient(&redis.Options{Addr: mr.Addr()}))
+	ctx := context.Background()
+	if err := tr.Start(ctx, "lib", "run", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := tr.Skipped(ctx, "lib", "run", []string{"one", "two"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tr.WalkDone(ctx, "lib", "run"); err != nil {
+		t.Fatal(err)
+	}
+	scan, err := tr.Get(ctx, "lib")
+	if err != nil || scan.State != StateComplete || scan.Discovered != 2 || scan.Done != 2 {
+		t.Fatalf("scan = %+v, %v", scan, err)
+	}
+	if _, ok, err := tr.ClaimPrune(ctx, "lib", "run"); err != nil || !ok {
+		t.Fatalf("skipped-only scan did not claim prune: %v, %v", ok, err)
+	}
+}
+
 func TestProgressIsolationAndPrune(t *testing.T) {
 	mr := miniredis.RunT(t)
 	tr := New(redis.NewClient(&redis.Options{Addr: mr.Addr()}))

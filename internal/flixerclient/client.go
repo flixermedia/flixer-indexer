@@ -29,6 +29,8 @@ const (
 	lyricsPath          = "/api/indexer/media/items/"
 	introSyncPath       = "/api/indexer/media/intro-sync"
 	introSavePath       = "/api/indexer/media/intro-segments"
+	scanStatePath       = "/api/indexer/media/scan-state"
+	scanSeenPath        = "/api/indexer/media/scan-seen"
 	librariesPathSuffix = "/remove-paths"
 )
 
@@ -39,6 +41,10 @@ type API interface {
 	ManualMatch(ctx context.Context, libraryID, itemType, path string) (map[string]string, error)
 	// UpsertItem creates or updates an item and returns flixer's id for it.
 	UpsertItem(ctx context.Context, item models.Item) (string, error)
+	// ScanState pages indexed file stats used to avoid reprocessing unchanged items.
+	ScanState(ctx context.Context, libraryID, afterID string, limit int) ([]models.ScanState, error)
+	// MarkScanItemsSeen keeps unchanged rows eligible for full-scan pruning.
+	MarkScanItemsSeen(ctx context.Context, libraryID string, itemIDs []string) error
 	// UpsertItemLyrics stores searchable lyrics for an indexed track.
 	UpsertItemLyrics(ctx context.Context, itemID, lyrics string) error
 	// IntroSyncCandidates pages through indexed movies or episodes for a backfill.
@@ -52,6 +58,24 @@ type API interface {
 	PruneLibrary(ctx context.Context, libraryID, scanStartedAt string) (int, error)
 	// DeleteItemsAtPaths removes indexed items at exact paths or recursively within directory paths.
 	DeleteItemsAtPaths(ctx context.Context, libraryID string, targets []models.PathRemoval) (int, error)
+}
+
+func (c *Client) ScanState(ctx context.Context, libraryID, afterID string, limit int) ([]models.ScanState, error) {
+	var body struct {
+		Items []models.ScanState `json:"items"`
+	}
+	request := map[string]any{"libraryId": libraryID, "limit": limit}
+	if afterID != "" {
+		request["afterId"] = afterID
+	}
+	if err := c.do(ctx, http.MethodPost, scanStatePath, request, &body); err != nil {
+		return nil, err
+	}
+	return body.Items, nil
+}
+
+func (c *Client) MarkScanItemsSeen(ctx context.Context, libraryID string, itemIDs []string) error {
+	return c.do(ctx, http.MethodPost, scanSeenPath, map[string]any{"libraryId": libraryID, "itemIds": itemIDs}, nil)
 }
 
 // ErrPermanent marks a response that retrying will not fix.
