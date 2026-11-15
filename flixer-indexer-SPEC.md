@@ -10,17 +10,18 @@ This document is a complete, self-contained specification. An AI (or human) shou
 
 ### Existing Flixer Ecosystem
 
-| Repo | Language | Role |
-|------|----------|------|
-| [flixermedia/flixer](https://github.com/flixermedia/flixer) | TypeScript (Ts.ED + Fastify + TypeORM) | Core backend API. Owns PostgreSQL database, settings, auth, and all media persistence. Currently uses **pg-boss** for jobs. |
-| [flixermedia/flixer-web](https://github.com/flixermedia/flixer-web) | Vue 3 + Vite + Pinia + Tailwind | Web frontend + future admin dashboard. |
-| [flixermedia/flixer-streamer](https://github.com/flixermedia/flixer-streamer) | Go | Dedicated streaming microservice (Direct Play / Stream / FFmpeg). JWT/HMAC auth, range requests. |
+| Repo                                                                          | Language                               | Role                                                                                                                        |
+| ----------------------------------------------------------------------------- | -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| [flixermedia/flixer](https://github.com/flixermedia/flixer)                   | TypeScript (Ts.ED + Fastify + TypeORM) | Core backend API. Owns PostgreSQL database, settings, auth, and all media persistence. Currently uses **pg-boss** for jobs. |
+| [flixermedia/flixer-web](https://github.com/flixermedia/flixer-web)           | Vue 3 + Vite + Pinia + Tailwind        | Web frontend + future admin dashboard.                                                                                      |
+| [flixermedia/flixer-streamer](https://github.com/flixermedia/flixer-streamer) | Go                                     | Dedicated streaming microservice (Direct Play / Stream / FFmpeg). JWT/HMAC auth, range requests.                            |
 
 - PostgreSQL is the single source of truth.
 - Media path is mounted read-only into containers.
 - Docker Compose brings the whole stack up behind a reverse proxy.
 - Settings live in a global `settings` table (JSON values).
-- The media scanner is still on the roadmap — this project implements it.
+- The media scanner is implemented. The indexer watches accessible library folders, scans changed paths, and periodically rescans shares that do not emit filesystem events.
+- Ordinary full-library rescans skip indexed files whose size and modification time are unchanged. Forced scans and items with NFO or local artwork are reprocessed; this fast path does not compute content hashes.
 
 ### Design Decisions (locked)
 
@@ -63,6 +64,7 @@ This document is a complete, self-contained specification. An AI (or human) shou
 ### Responsibilities
 
 **flixer-indexer**
+
 - Discover libraries from flixer.
 - Walk library folders according to type (movies / series / music).
 - Identify media via filename, NFO, embedded tags.
@@ -73,12 +75,14 @@ This document is a complete, self-contained specification. An AI (or human) shou
 - Honour live concurrency settings.
 
 **flixer**
+
 - Own the database schema and all writes.
 - Expose internal API for media upsert + library/settings reads.
 - Proxy or re-expose task status to flixer-web.
 - Store provider API keys and per-library image-storage preference.
 
 **flixer-web**
+
 - Admin dashboard showing live tasks, queue depths, concurrency controls, cancel/retry, etc.
 
 ---
@@ -87,14 +91,14 @@ This document is a complete, self-contained specification. An AI (or human) shou
 
 ### Queues (priority + weighted)
 
-| Queue        | Purpose                                      | Default concurrency | Notes |
-|--------------|----------------------------------------------|---------------------|-------|
-| `scan`       | Walk library folders, discover files         | 1–4                 | Produces downstream tasks |
-| `identify`   | Parse filename / NFO / tags → provider IDs   | 8–16                | |
-| `metadata`   | Fetch title, overview, cast, ratings, etc.   | 8–16                | Configurable live |
-| `images`     | Download + process posters, backdrops, logos | 4–12                | Dedicated workers |
-| `probe`      | ffprobe technical metadata                   | 4–8                 | |
-| `refresh`    | Forced re-scan of existing items             | same as metadata    | |
+| Queue      | Purpose                                      | Default concurrency | Notes                     |
+| ---------- | -------------------------------------------- | ------------------- | ------------------------- |
+| `scan`     | Walk library folders, discover files         | 1–4                 | Produces downstream tasks |
+| `identify` | Parse filename / NFO / tags → provider IDs   | 8–16                |                           |
+| `metadata` | Fetch title, overview, cast, ratings, etc.   | 8–16                | Configurable live         |
+| `images`   | Download + process posters, backdrops, logos | 4–12                | Dedicated workers         |
+| `probe`    | ffprobe technical metadata                   | 4–8                 |                           |
+| `refresh`  | Forced re-scan of existing items             | same as metadata    |                           |
 
 Each individual media item (movie file, episode, album, track) is **one Asynq task**.  
 Image download and any resizing/thumbnail generation **must** run on the `images` queue.
@@ -113,6 +117,7 @@ const (
 ```
 
 Payloads should be small JSON structs containing at least:
+
 - `libraryId`
 - `path` (absolute or relative to library root)
 - `itemType` (`movie`, `episode`, `series`, `album`, `track`, …)
@@ -120,6 +125,7 @@ Payloads should be small JSON structs containing at least:
 - optional parent IDs (series/season/album)
 
 Tasks should support:
+
 - Retries with exponential backoff
 - Timeouts / deadlines
 - Unique option (deduplication by path or content hash where sensible)
@@ -212,6 +218,7 @@ Local NFO + local image files always take priority. Remote providers only fill m
 ## 5. Metadata Providers (Jellyfin + Plex parity)
 
 ### Movies / TV / People / Collections
+
 - **TMDB** (primary)
 - **TVDB**
 - **OMDb**
@@ -220,12 +227,14 @@ Local NFO + local image files always take priority. Remote providers only fill m
 - Local NFO
 
 ### Music
+
 - **MusicBrainz**
 - **TheAudioDB**
 - Discogs (optional / lower priority)
 - Local tags + embedded art
 
 ### Rules
+
 - All provider API keys are stored in flixer’s database (`settings` or a dedicated `provider_credentials` table).
 - Indexer reads keys at startup and on refresh.
 - Admin can edit keys in flixer-web.
@@ -240,7 +249,7 @@ Local NFO + local image files always take priority. Remote providers only fill m
 Stored on the library row:
 
 ```ts
-imageStorage: "alongside" | "cache"
+imageStorage: "alongside" | "cache";
 ```
 
 - `"alongside"` → write posters, backdrops, logos, etc. next to the media file (or in a conventional sub-folder such as `.media` / `metadata`).
@@ -259,28 +268,28 @@ Never expose them publicly.
 
 ### Indexer → flixer
 
-| Method | Path | Purpose |
-|--------|------|---------|
-| `GET`  | `/internal/libraries` | List libraries (id, name, path, type, imageStorage, enabled providers) |
-| `GET`  | `/internal/settings/providers` | API keys + enabled providers |
-| `GET`  | `/internal/settings/concurrency` | Current max concurrency per queue |
-| `POST` | `/internal/media/items` | Create or upsert a media item + metadata + images |
-| `PATCH`| `/internal/media/items/{id}` | Partial update |
-| `POST` | `/internal/media/people` | Upsert people (actors, directors, …) |
-| `POST` | `/internal/media/genres` | Upsert genres (optional) |
+| Method  | Path                             | Purpose                                                                |
+| ------- | -------------------------------- | ---------------------------------------------------------------------- |
+| `GET`   | `/internal/libraries`            | List libraries (id, name, path, type, imageStorage, enabled providers) |
+| `GET`   | `/internal/settings/providers`   | API keys + enabled providers                                           |
+| `GET`   | `/internal/settings/concurrency` | Current max concurrency per queue                                      |
+| `POST`  | `/internal/media/items`          | Create or upsert a media item + metadata + images                      |
+| `PATCH` | `/internal/media/items/{id}`     | Partial update                                                         |
+| `POST`  | `/internal/media/people`         | Upsert people (actors, directors, …)                                   |
+| `POST`  | `/internal/media/genres`         | Upsert genres (optional)                                               |
 
 ### flixer → indexer
 
-| Method | Path | Purpose |
-|--------|------|---------|
-| `POST` | `/internal/scan` | Start library scan `{ libraryId, full?: boolean }` |
-| `POST` | `/internal/refresh/{itemId}` | Force refresh one item |
-| `GET`  | `/internal/tasks` | List tasks (filter by status, queue, libraryId) |
-| `GET`  | `/internal/tasks/{id}` | Task detail + progress |
-| `POST` | `/internal/tasks/{id}/cancel` | Cancel a task |
-| `POST` | `/internal/concurrency` | Live update of worker limits |
-| `GET`  | `/internal/stats` | Queue depths, active/idle workers, error rates, etc. |
-| `GET`  | `/health` | Health check |
+| Method | Path                          | Purpose                                              |
+| ------ | ----------------------------- | ---------------------------------------------------- |
+| `POST` | `/internal/scan`              | Start library scan `{ libraryId, full?: boolean }`   |
+| `POST` | `/internal/refresh/{itemId}`  | Force refresh one item                               |
+| `GET`  | `/internal/tasks`             | List tasks (filter by status, queue, libraryId)      |
+| `GET`  | `/internal/tasks/{id}`        | Task detail + progress                               |
+| `POST` | `/internal/tasks/{id}/cancel` | Cancel a task                                        |
+| `POST` | `/internal/concurrency`       | Live update of worker limits                         |
+| `GET`  | `/internal/stats`             | Queue depths, active/idle workers, error rates, etc. |
+| `GET`  | `/health`                     | Health check                                         |
 
 Authentication: shared secret header (e.g. `X-Internal-Token`) or mTLS — same pattern used by flixer-streamer.
 
@@ -290,7 +299,7 @@ Authentication: shared secret header (e.g. `X-Internal-Token`) or mTLS — same 
 
 The admin UI must expose **everything** Jellyfin and Plex show for library scanning, plus:
 
-- Live task table  
+- Live task table
   - type, item title/path, progress %, status, started time, ETA, retries, last error
 - Queue depth + active / idle workers per queue
 - Ability to pause / resume / cancel individual tasks or whole queues
@@ -389,37 +398,37 @@ Concurrency values are defaults; live values come from flixer settings.
 
 ## 12. Implementation Priorities (suggested order)
 
-1. **Skeleton**  
+1. **Skeleton**
    - Go module, Asynq client + server, basic HTTP internal API, health endpoint, config loading.
 
-2. **flixerclient**  
-   - Typed client for the internal endpoints that flixer will expose (`/internal/libraries`, `/internal/media/items`, …).  
+2. **flixerclient**
+   - Typed client for the internal endpoints that flixer will expose (`/internal/libraries`, `/internal/media/items`, …).
    - Mock or stub the flixer side until the real API exists.
 
-3. **Scanner + Identify**  
-   - Library walker that respects type.  
-   - Filename / NFO / embedded-tag parsers.  
+3. **Scanner + Identify**
+   - Library walker that respects type.
+   - Filename / NFO / embedded-tag parsers.
    - Enqueue downstream tasks.
 
-4. **Providers (start with TMDB + MusicBrainz)**  
-   - Fetch metadata.  
+4. **Providers (start with TMDB + MusicBrainz)**
+   - Fetch metadata.
    - Respect local NFO priority.
 
-5. **Images queue**  
+5. **Images queue**
    - Download, honour per-library storage policy, basic validation.
 
-6. **Probe**  
+6. **Probe**
    - ffprobe integration.
 
-7. **Full pipeline + status endpoints**  
-   - End-to-end scan → persist via flixer API.  
+7. **Full pipeline + status endpoints**
+   - End-to-end scan → persist via flixer API.
    - Task listing, cancel, stats, live concurrency reload.
 
-8. **Admin surface**  
-   - flixer proxies the status endpoints.  
+8. **Admin surface**
+   - flixer proxies the status endpoints.
    - flixer-web admin page.
 
-9. **Remaining providers + polish**  
+9. **Remaining providers + polish**
    - TVDB, OMDb, Fanart, AniDB/AniList, AudioDB, rate-limit handling, retries, metrics.
 
 ---
@@ -430,7 +439,7 @@ Concurrency values are defaults; live values come from flixer settings.
 - Public HTTP API.
 - Transcoding or streaming (that is flixer-streamer).
 - User-facing search or library browsing (that is flixer + flixer-web).
-- Real-time filesystem watching (can be added later; first version is on-demand + scheduled scans).
+- Content-hash-based change detection; incremental scans use stored size and modification time, with forced scans available when deeper reprocessing is needed.
 
 ---
 

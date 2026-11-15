@@ -27,7 +27,7 @@
 - **Metadata sources:** TMDB, TVDB, OMDb, Fanart.tv, AniList, MusicBrainz and others.
 - **Local-first metadata:** NFO files and accompanying artwork take precedence.
 - **Media analysis:** FFmpeg/FFprobe and trickplay thumbnail generation.
-- **Incremental updates:** Folder watching, item refresh and periodic rescans.
+- **Incremental updates:** Folder watching, changed-subtree scans, periodic rescans, and full-scan skipping for unchanged files.
 
 ## 🏗️ Architecture
 
@@ -71,18 +71,18 @@ Intro lookups are spaced across workers using Redis. A provider's HTTP 429 pause
 
 ## ⚙️ Configuration
 
-| Variable | Purpose / default |
-| --- | --- |
-| `PORT` | HTTP API; `8092`. |
-| `ROLE` | `all`, `api` or `worker`; default `all`. |
-| `FLIXER_URL` | Backend URL; default `http://localhost:8083`. |
-| `APP_SECRET` | Shared HMAC signing secret. |
-| `REDIS_ADDR` | Queue Redis; default `localhost:6379`. |
-| `CACHE_PATH` | Cache root; default `./cache`. |
-| `TRICKPLAY_ENABLED` | Thumbnail jobs; default `true`. |
-| `WATCH_FOLDERS` | Folder watching; default `true`. |
-| `CONCURRENCY_INTRO_MOVIES` | Movie timing-sync workers; default `2`. |
-| `CONCURRENCY_INTRO_EPISODES` | Episode timing-sync workers; default `4`. |
+| Variable                     | Purpose / default                             |
+| ---------------------------- | --------------------------------------------- |
+| `PORT`                       | HTTP API; `8092`.                             |
+| `ROLE`                       | `all`, `api` or `worker`; default `all`.      |
+| `FLIXER_URL`                 | Backend URL; default `http://localhost:8083`. |
+| `APP_SECRET`                 | Shared HMAC signing secret.                   |
+| `REDIS_ADDR`                 | Queue Redis; default `localhost:6379`.        |
+| `CACHE_PATH`                 | Cache root; default `./cache`.                |
+| `TRICKPLAY_ENABLED`          | Thumbnail jobs; default `true`.               |
+| `WATCH_FOLDERS`              | Folder watching; default `true`.              |
+| `CONCURRENCY_INTRO_MOVIES`   | Movie timing-sync workers; default `2`.       |
+| `CONCURRENCY_INTRO_EPISODES` | Episode timing-sync workers; default `4`.     |
 
 Provider credentials are fallback values; settings fetched from Flixer take precedence. See [`.env.example`](.env.example) and [`flixer-indexer-SPEC.md`](flixer-indexer-SPEC.md).
 
@@ -113,7 +113,7 @@ The checked-in `third_party/flixer-logger` snapshot supports independent
 builds before the logger module is published. Refresh it from the logger
 repository with `bash scripts/vendor-go-sdk.sh /path/to/flixer-indexer`.
 
-Filesystem events scan only the changed media file or folder subtree. Removed or renamed items are deleted by exact path (or by subtree for removed directories), then any replacement paths from the same event batch are indexed. Artwork and metadata sidecars rescan their containing folder. Optional periodic rescans remain full-library scans for network shares that do not emit filesystem events.
+Filesystem events scan only the changed media file or folder subtree. Removed or renamed items are deleted by exact path (or by subtree for removed directories), then any replacement paths from the same event batch are indexed. Artwork and metadata sidecars rescan their containing folder. Optional periodic rescans remain full-library scans for network shares that do not emit filesystem events. During ordinary full-library scans, indexed items with matching file size and modification time skip identification, metadata, image, and probe work; forced scans and items with NFO or local artwork are always reprocessed. Skipped items are still marked as seen so missing-file cleanup remains correct. This comparison is a fast stat check, not a content hash. The Flixer API must be upgraded before the indexer so the signed scan-state endpoints are available.
 
 Tracked scans are isolated per run; a newer scan supersedes an older run's progress and its cleanup. Only the latest
 successful, nonempty full-library scan can remove stale entries.
@@ -136,28 +136,28 @@ merge items or split a previously grouped item; it only reindexes selected folde
 
 ## 🔌 Internal API
 
-| Route | Function |
-| --- | --- |
-| `POST /internal/scan`, `/internal/refresh` | Queue scans or refreshes. |
-| `GET /internal/scans`, `/internal/stats` | Observe progress and metrics. |
-| `GET /internal/tasks` | Inspect queued work. |
-| `POST /internal/queues/{queue}/pause`, `/resume` | Pause and resume work. |
-| `GET, POST /internal/concurrency` | Manage worker counts. |
-| `POST /internal/settings/reload` | Refresh settings from Flixer. |
+| Route                                            | Function                      |
+| ------------------------------------------------ | ----------------------------- |
+| `POST /internal/scan`, `/internal/refresh`       | Queue scans or refreshes.     |
+| `GET /internal/scans`, `/internal/stats`         | Observe progress and metrics. |
+| `GET /internal/tasks`                            | Inspect queued work.          |
+| `POST /internal/queues/{queue}/pause`, `/resume` | Pause and resume work.        |
+| `GET, POST /internal/concurrency`                | Manage worker counts.         |
+| `POST /internal/settings/reload`                 | Refresh settings from Flixer. |
 
 Internal calls use timestamped HMAC signatures. Keep these endpoints off public networks.
 
 ## 🧩 Flixer ecosystem
 
-| Repository | Purpose |
-| --- | --- |
-| [Flixer](https://github.com/flixermedia/flixer) | The self-hosted backend API, authentication, libraries, and administration service. |
-| [Flixer Web](https://github.com/flixermedia/flixer-web) | The Vue 3 application that powers browsing, sign-in, discovery, and playback interfaces. |
-| [Flixer Streamer](https://github.com/flixermedia/flixer-streamer) | The Go service responsible for authorised media delivery and FFmpeg processing. |
-| [Flixer Indexer](https://github.com/flixermedia/flixer-indexer) | The Go worker and API service for discovering, identifying, probing, and enriching media. |
-| [Flixer Updater](https://github.com/flixermedia/flixer-updater) | The Go sidecar that orchestrates Docker Compose updates and restores. |
-| [Flixer Plugins](https://github.com/flixermedia/flixer-plugins) | The official versioned catalogue of Flixer plugins and plugin schemas. |
-| [Flixer Docs](https://github.com/flixermedia/flixer-docs) | The Docusaurus source for Flixer platform documentation. |
+| Repository                                                        | Purpose                                                                                   |
+| ----------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| [Flixer](https://github.com/flixermedia/flixer)                   | The self-hosted backend API, authentication, libraries, and administration service.       |
+| [Flixer Web](https://github.com/flixermedia/flixer-web)           | The Vue 3 application that powers browsing, sign-in, discovery, and playback interfaces.  |
+| [Flixer Streamer](https://github.com/flixermedia/flixer-streamer) | The Go service responsible for authorised media delivery and FFmpeg processing.           |
+| [Flixer Indexer](https://github.com/flixermedia/flixer-indexer)   | The Go worker and API service for discovering, identifying, probing, and enriching media. |
+| [Flixer Updater](https://github.com/flixermedia/flixer-updater)   | The Go sidecar that orchestrates Docker Compose updates and restores.                     |
+| [Flixer Plugins](https://github.com/flixermedia/flixer-plugins)   | The official versioned catalogue of Flixer plugins and plugin schemas.                    |
+| [Flixer Docs](https://github.com/flixermedia/flixer-docs)         | The Docusaurus source for Flixer platform documentation.                                  |
 
 ## 🤝 Contributing
 
