@@ -107,12 +107,14 @@ func TestParseTrackAndAlbum(t *testing.T) {
 }
 
 func TestIsExtra(t *testing.T) {
-	for _, name := range []string{"Movie-trailer", "extras", "Featurettes", "movie-sample"} {
+	for _, name := range []string{"Movie-trailer", "extras", "Featurettes", "movie-sample", "Movie-trailer.mkv", "Movie-SAMPLE.MP4", "trailer.mkv", "Movie-featurette.mkv", "Movie.trailer.mkv"} {
 		if !IsExtra(name) {
 			t.Errorf("%q should be an extra", name)
 		}
 	}
-	if IsExtra("Movie") {
-		t.Error("Movie is not an extra")
+	for _, name := range []string{"Movie", "Movie.mkv", "Movie Trailer (2024).mkv", "Movie-trailer.txt"} {
+		if IsExtra(name) {
+			t.Errorf("%q is not an extra", name)
+		}
 	}
 }

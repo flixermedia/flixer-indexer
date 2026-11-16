@@ -245,6 +245,9 @@ func ParseAlbum(name string) Album {
 // should not be indexed as a feature.
 func IsExtra(name string) bool {
 	lower := strings.ToLower(strings.TrimSpace(name))
+	if IsVideo(lower) {
+		lower = strings.TrimSuffix(lower, filepath.Ext(lower))
+	}
 	switch lower {
 	case "extras", "extra", "trailers", "featurettes", "behind the scenes", "deleted scenes",
 		"interviews", "scenes", "shorts", "samples", "sample", "other", "@eadir", "metadata", ".actors":

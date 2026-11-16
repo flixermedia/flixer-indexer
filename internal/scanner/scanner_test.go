@@ -56,6 +56,8 @@ func TestMovies(t *testing.T) {
 	touch(t, root,
 		"The Matrix (1999) [tmdbid-603]/The Matrix (1999).mkv",
 		"The Matrix (1999) [tmdbid-603]/Trailers/trailer.mkv",
+		"The Matrix (1999) [tmdbid-603]/The Matrix-trailer.mkv",
+		"The Matrix (1999) [tmdbid-603]/sample.mp4",
 		"Loose Movie (2010).mp4",
 		"notes.txt")
 	ws := collect(t, lib(models.LibraryMovies, root))
@@ -78,6 +80,7 @@ func TestShows(t *testing.T) {
 	touch(t, root,
 		"Show (2020)/Season 1/Show S01E01 Pilot.mkv",
 		"Show (2020)/Season 1/Show S01E02.mkv",
+		"Show (2020)/Season 1/Show S01E01-trailer.mkv",
 		"Show (2020)/Season 2/Show S02E01.mkv",
 		"Show (2020)/Specials/ignored.txt")
 	ws := collect(t, lib(models.LibraryTVShows, root))
