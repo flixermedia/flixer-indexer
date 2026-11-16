@@ -211,7 +211,7 @@ func (s *Server) scan(w http.ResponseWriter, r *http.Request) {
 	}
 	seenJobs := make(map[string]bool, len(req.Jobs))
 	for _, job := range req.Jobs {
-		if job != "images" && job != "descriptions" && job != "fileData" && job != "lyrics" {
+		if job != "images" && job != "descriptions" && job != "fileData" && job != "lyrics" && job != "hashes" {
 			writeError(w, http.StatusBadRequest, "unsupported scan job")
 			return
 		}

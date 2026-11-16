@@ -149,6 +149,26 @@ func TestScanAndInspect(t *testing.T) {
 	}
 }
 
+func TestScanHashJobValidation(t *testing.T) {
+	h := newServer(t)
+	for _, test := range []struct {
+		name string
+		jobs []string
+		want int
+	}{
+		{name: "hashes", jobs: []string{"hashes"}, want: http.StatusAccepted},
+		{name: "duplicate hashes", jobs: []string{"hashes", "hashes"}, want: http.StatusBadRequest},
+		{name: "unsupported job", jobs: []string{"unknown"}, want: http.StatusBadRequest},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			rec := do(h, http.MethodPost, "/internal/scan", models.ScanRequest{LibraryID: "lib1", Jobs: test.jobs}, true)
+			if rec.Code != test.want {
+				t.Fatalf("scan status = %d, want %d: %s", rec.Code, test.want, rec.Body)
+			}
+		})
+	}
+}
+
 func TestIntroSegmentQueueValidatesRequestAndProviderSettings(t *testing.T) {
 	h := newServer(t)
 	if rec := do(h, http.MethodPost, "/internal/intro/queue", map[string]string{"libraryId": "lib1", "type": "series"}, true); rec.Code != http.StatusBadRequest {
