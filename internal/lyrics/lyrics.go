@@ -1,5 +1,5 @@
-// Package lyrics finds LRC lyrics next to audio files and downloads missing
-// ones from lrclib.net, saving them next to the audio, or under DATA_DIR/cache/lyrics/<track id>.lrc when that folder is read-only.
+// Package lyrics finds local lyrics and downloads missing synced lyrics from
+// LRCLIB with Unison fallback, saving them beside audio or in the cache.
 package lyrics
 
 import (
@@ -26,14 +26,23 @@ const (
 	maxBody     = 2 << 20
 )
 
-// Fetcher downloads lyrics from an lrclib-compatible API.
+// Fetcher downloads lyrics from LRCLIB and Unison.
 type Fetcher struct {
-	BaseURL   string
-	UserAgent string
-	HTTP      *http.Client
+	BaseURL       string
+	UnisonBaseURL string
+	UserAgent     string
+	HTTP          *http.Client
 
-	mu   sync.Mutex
-	next time.Time
+	mu                  sync.Mutex
+	next                time.Time
+	appID               string
+	apiKey              string
+	lrclibLimitedUntil  time.Time
+	unisonLimitedUntil  time.Time
+	unisonNext          time.Time
+	providersConfigured bool
+	lrclibEnabled       bool
+	unisonEnabled       bool
 }
 
 const (
@@ -86,8 +95,40 @@ func retryAfter(h string, attempt int) time.Duration {
 	return min(wait, maxRetryWait)
 }
 
+func rateLimitDelay(header string) time.Duration {
+	if seconds, err := strconv.ParseUint(strings.TrimSpace(header), 10, 32); err == nil {
+		return time.Duration(seconds) * time.Second
+	}
+	if until, err := http.ParseTime(header); err == nil {
+		return max(0, time.Until(until))
+	}
+	return retryAfter("", 0)
+}
+
 func NewFetcher(userAgent string) *Fetcher {
-	return &Fetcher{BaseURL: defaultBase, UserAgent: userAgent, HTTP: &http.Client{Timeout: 20 * time.Second}}
+	return &Fetcher{BaseURL: defaultBase, UnisonBaseURL: "https://unison.betterlyrics.org", UserAgent: userAgent, HTTP: &http.Client{Timeout: 20 * time.Second}}
+}
+
+// SetCredentials configures the optional LRCLIB app ID and API key safely for live reloads.
+func (f *Fetcher) SetCredentials(appID, apiKey string) {
+	f.mu.Lock()
+	f.appID = strings.TrimSpace(appID)
+	f.apiKey = strings.TrimSpace(apiKey)
+	f.mu.Unlock()
+}
+
+func (f *Fetcher) SetProviders(lrclibEnabled, unisonEnabled bool) {
+	f.mu.Lock()
+	f.providersConfigured = true
+	f.lrclibEnabled = lrclibEnabled
+	f.unisonEnabled = unisonEnabled
+	f.mu.Unlock()
+}
+
+func (f *Fetcher) providers() (bool, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return !f.providersConfigured || f.lrclibEnabled, f.UnisonBaseURL != "" && (!f.providersConfigured || f.unisonEnabled)
 }
 
 // Query identifies a track.
@@ -138,6 +179,8 @@ func (r response) usable() bool {
 
 // ErrNotFound means the service has no synced lyrics for the track.
 var ErrNotFound = errors.New("lyrics not found")
+
+var errRateLimited = errors.New("lrclib rate limited")
 
 // maxDurationDiff is how far (seconds) a search result's length may differ from
 // the file's before it is assumed to be a different recording.
@@ -206,9 +249,16 @@ func titleVariants(title string) []string {
 }
 
 func (f *Fetcher) get(ctx context.Context, endpoint string, params url.Values, out any) error {
+	_, unisonEnabled := f.providers()
 	for attempt := 0; ; attempt++ {
 		if err := f.pace(ctx); err != nil {
 			return err
+		}
+		f.mu.Lock()
+		limited := time.Now().Before(f.lrclibLimitedUntil)
+		f.mu.Unlock()
+		if unisonEnabled && limited {
+			return errRateLimited
 		}
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(f.BaseURL, "/")+endpoint+"?"+params.Encode(), nil)
 		if err != nil {
@@ -216,6 +266,16 @@ func (f *Fetcher) get(ctx context.Context, endpoint string, params url.Values, o
 		}
 		if f.UserAgent != "" {
 			req.Header.Set("User-Agent", f.UserAgent)
+		}
+		f.mu.Lock()
+		appID := f.appID
+		apiKey := f.apiKey
+		f.mu.Unlock()
+		if appID != "" {
+			req.Header.Set("Lrclib-App-Id", appID)
+		}
+		if apiKey != "" {
+			req.Header.Set("Lrclib-Api-Key", apiKey)
 		}
 		resp, err := f.HTTP.Do(req)
 		if err != nil {
@@ -225,6 +285,14 @@ func (f *Fetcher) get(ctx context.Context, endpoint string, params url.Values, o
 		case resp.StatusCode == http.StatusNotFound:
 			resp.Body.Close()
 			return ErrNotFound
+		case resp.StatusCode == http.StatusTooManyRequests && unisonEnabled:
+			wait := rateLimitDelay(resp.Header.Get("Retry-After"))
+			resp.Body.Close()
+			f.holdOff(wait)
+			f.mu.Lock()
+			f.lrclibLimitedUntil = time.Now().Add(wait)
+			f.mu.Unlock()
+			return errRateLimited
 		case resp.StatusCode == http.StatusTooManyRequests && attempt < maxRateRetries:
 			wait := retryAfter(resp.Header.Get("Retry-After"), attempt)
 			resp.Body.Close()
@@ -321,10 +389,10 @@ func (f *Fetcher) search(ctx context.Context, params url.Values, artists []strin
 	return best, nil
 }
 
-// Fetch returns synced lyrics for the track. It tries the exact lookup, then
+// fetchLRCLIB tries the exact lookup, then
 // searches with progressively looser names (decorations removed, other artist
 // credits), and finally a title-only search checked against the artist.
-func (f *Fetcher) Fetch(ctx context.Context, q Query) (string, error) {
+func (f *Fetcher) fetchLRCLIB(ctx context.Context, q Query) (string, error) {
 	artists := artistVariants(q.Artist, q.AlbumArtist)
 	titles := titleVariants(q.Title)
 	if len(titles) == 0 || len(artists) == 0 {
@@ -342,7 +410,11 @@ func (f *Fetcher) Fetch(ctx context.Context, q Query) (string, error) {
 	}
 
 	for _, withAlbum := range []bool{true, false} {
-		if text, ok := try(f.exact(ctx, artists[0], titles[0], q, withAlbum)); ok {
+		text, err := f.exact(ctx, artists[0], titles[0], q, withAlbum)
+		if errors.Is(err, errRateLimited) || ctx.Err() != nil {
+			return "", err
+		}
+		if text, ok := try(text, err); ok {
 			return text, nil
 		}
 	}
@@ -351,7 +423,11 @@ func (f *Fetcher) Fetch(ctx context.Context, q Query) (string, error) {
 			params := url.Values{}
 			params.Set("artist_name", artist)
 			params.Set("track_name", title)
-			if text, ok := try(f.search(ctx, params, artists, q.Title, q)); ok {
+			text, err := f.search(ctx, params, artists, q.Title, q)
+			if errors.Is(err, errRateLimited) || ctx.Err() != nil {
+				return "", err
+			}
+			if text, ok := try(text, err); ok {
 				return text, nil
 			}
 		}
@@ -365,6 +441,32 @@ func (f *Fetcher) Fetch(ctx context.Context, q Query) (string, error) {
 		return "", firstErr
 	}
 	return "", ErrNotFound
+}
+
+// Fetch prefers LRCLIB and falls back to Unison on misses or rate limits.
+func (f *Fetcher) Fetch(ctx context.Context, q Query) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	f.mu.Lock()
+	limited := time.Now().Before(f.lrclibLimitedUntil)
+	f.mu.Unlock()
+	lrclibEnabled, unisonEnabled := f.providers()
+	text, err := "", ErrNotFound
+	if lrclibEnabled && limited && unisonEnabled {
+		err = errRateLimited
+	}
+	if lrclibEnabled && (!limited || !unisonEnabled) {
+		text, err = f.fetchLRCLIB(ctx, q)
+	}
+	if err == nil || !unisonEnabled || (!errors.Is(err, ErrNotFound) && !errors.Is(err, errRateLimited)) || ctx.Err() != nil {
+		return text, err
+	}
+	fallback, fallbackErr := f.fetchUnison(ctx, q)
+	if errors.Is(fallbackErr, ErrNotFound) && errors.Is(err, errRateLimited) {
+		return "", err
+	}
+	return fallback, fallbackErr
 }
 
 // Ensure makes sure lyrics exist for the track, either as a sidecar next to

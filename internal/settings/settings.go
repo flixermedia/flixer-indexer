@@ -32,6 +32,7 @@ type Reloader struct {
 	PluginRunner *runner.Runner
 	UA           string
 	Language     string
+	LyricsFetch  bool
 	Interval     time.Duration
 	Log          *slog.Logger
 
@@ -141,6 +142,25 @@ func (r *Reloader) Reload(ctx context.Context) error {
 		client.SetAPIKey(introDB.APIKey)
 	}
 	r.Pipeline.SetTheIntroDBEnabled(!configured || introDB.Enabled)
+	lrclib, configured := s.Providers["lrclib"]
+	lrclibKey := r.EnvKeys["lrclib"]
+	lrclibAppID := r.EnvKeys["lrclib_app_id"]
+	lrclibEnabled := r.LyricsFetch
+	if configured {
+		lrclibEnabled = r.LyricsFetch && lrclib.Enabled
+		if lrclib.APIKey != "" {
+			lrclibKey = lrclib.APIKey
+		}
+		if lrclib.AppID != "" {
+			lrclibAppID = lrclib.AppID
+		}
+	}
+	unisonEnabled := lrclibEnabled
+	if unison, configured := s.Providers["unison"]; configured {
+		unisonEnabled = r.LyricsFetch && unison.Enabled
+	}
+	r.Pipeline.SetLyricsEnabled(lrclibEnabled, unisonEnabled, r.UA, lrclibAppID, lrclibKey)
+
 	introDBFallback, configured := s.Providers["introdb"]
 	r.Pipeline.SetIntroDBEnabled(!configured || introDBFallback.Enabled)
 

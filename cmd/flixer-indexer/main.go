@@ -149,6 +149,7 @@ func run() error {
 	pipe.LyricsDir = cfg.LyricsDir
 	if cfg.LyricsFetch {
 		pipe.Lyrics = lyrics.NewFetcher(cfg.UserAgent)
+		pipe.Lyrics.SetCredentials(cfg.ProviderKeys["lrclib_app_id"], cfg.ProviderKeys["lrclib"])
 	}
 	envSubs := models.SubtitleSettings{
 		APIKey: cfg.OpenSubtitlesKey, Username: cfg.OpenSubtitlesUser, Password: cfg.OpenSubtitlesPassword,
@@ -162,7 +163,7 @@ func run() error {
 	}
 	reloader := &settings.Reloader{
 		Client: client, Pipeline: pipe, Pool: pool, EnvKeys: cfg.ProviderKeys, EnvSubtitles: envSubs,
-		UA: cfg.UserAgent, Language: cfg.Language, Interval: time.Minute, Log: log,
+		UA: cfg.UserAgent, Language: cfg.Language, LyricsFetch: cfg.LyricsFetch, Interval: time.Minute, Log: log,
 		PluginsPath: cfg.PluginsPath, PluginRunner: pluginRunner,
 	}
 	// Start with the environment's settings so work can run even when flixer is down.

@@ -151,6 +151,19 @@ func (p *Pipeline) wakeIntroBackfill() {
 	}
 }
 
+// SetLyricsEnabled switches lyric providers while preserving sidecar lyrics.
+func (p *Pipeline) SetLyricsEnabled(lrclibEnabled, unisonEnabled bool, userAgent, appID, apiKey string) {
+	if !lrclibEnabled && !unisonEnabled {
+		p.Lyrics = nil
+		return
+	}
+	if p.Lyrics == nil {
+		p.Lyrics = lyrics.NewFetcher(userAgent)
+	}
+	p.Lyrics.SetCredentials(appID, apiKey)
+	p.Lyrics.SetProviders(lrclibEnabled, unisonEnabled)
+}
+
 func (p *Pipeline) SetTrickplay(enabled bool, directory, ffmpeg string, interval, width int) {
 	p.TrickplayEnabled = enabled
 	p.Trickplay = &trickplay.Generator{Directory: directory, FFmpeg: ffmpeg, Interval: interval, Width: width, Prober: p.Probe}

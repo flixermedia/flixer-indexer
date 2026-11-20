@@ -68,6 +68,7 @@ type Library struct {
 type ProviderSetting struct {
 	Enabled bool   `json:"enabled"`
 	APIKey  string `json:"apiKey,omitempty"`
+	AppID   string `json:"appId,omitempty"`
 }
 
 // IntroSyncCandidate is one existing media row from Flixer's paged backfill feed.

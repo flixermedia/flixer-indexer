@@ -103,7 +103,7 @@ type Config struct {
 	ProviderKeys map[string]string
 	UserAgent    string
 	Language     string
-	// LyricsFetch enables downloading missing .lrc files from lrclib.net.
+	// LyricsFetch enables downloading missing synced lyrics from configured providers.
 	LyricsFetch bool
 	// OpenSubtitles credentials enable subtitle search and download; SubtitleLanguages are fetched automatically.
 	OpenSubtitlesKey      string
@@ -216,11 +216,14 @@ func Load() (Config, error) {
 	for provider, env := range map[string]string{
 		"tmdb": "TMDB_API_KEY", "tvdb": "TVDB_API_KEY", "omdb": "OMDB_API_KEY",
 		"fanart": "FANART_API_KEY", "audiodb": "AUDIODB_API_KEY",
-		"discogs": "DISCOGS_TOKEN", "anidb": "ANIDB_CLIENT",
+		"discogs": "DISCOGS_TOKEN", "anidb": "ANIDB_CLIENT", "lrclib": "LRCLIB_API_KEY",
 	} {
 		if value := strings.TrimSpace(os.Getenv(env)); value != "" {
 			keys[provider] = value
 		}
+	}
+	if value := strings.TrimSpace(os.Getenv("LRCLIB_APP_ID")); value != "" {
+		keys["lrclib_app_id"] = value
 	}
 
 	dataPath := strings.TrimSpace(envOrDefault("DATA_PATH", os.Getenv("DATA_DIR")))

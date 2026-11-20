@@ -86,6 +86,20 @@ Intro lookups are spaced across workers using Redis. A provider's HTTP 429 pause
 
 Provider credentials are fallback values; settings fetched from Flixer take precedence. See [`.env.example`](.env.example) and [`flixer-indexer-SPEC.md`](flixer-indexer-SPEC.md).
 
+### Lyrics providers
+
+Missing synced lyrics are fetched from LRCLIB first. Unison is tried when
+LRCLIB returns a rate limit or has no matching synced lyrics. LRCLIB's cooldown
+does not delay Unison requests. Both providers can be enabled independently in
+Flixer's provider settings; neither requires a key, and optional LRCLIB
+credentials are never sent to Unison. `LYRICS_FETCH` still controls downloads.
+
+Existing sidecars and cached lyrics are reused without a network request.
+Unison LRC is stored directly; TTML is converted to LRC, preserving line and
+inline word starts and explicit gaps. Plain-text-only responses are skipped.
+Provider and submitter links are retained in a `[unison:...]` metadata tag and
+shown by the Flixer lyric viewer, as required by Unison's attribution policy.
+
 ### Experimental Flixer Logger export
 
 The indexer enrolls using its shared application secret when `FLIXER_URL` is
