@@ -14,7 +14,8 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -trimpat
 FROM alpine:3.22 AS runtime
 ARG APP_VERSION=dev
 RUN apk add --no-cache ca-certificates curl ffmpeg \
-    && adduser -D -H -u 65532 indexer \
+    && addgroup -g 1000 indexer \
+    && adduser -D -H -u 1000 -G indexer indexer \
     && mkdir -p /data/cache \
     && chown -R indexer:indexer /data/cache
 

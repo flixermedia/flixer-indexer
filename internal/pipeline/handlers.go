@@ -758,7 +758,7 @@ func (p *Pipeline) handleImages(ctx context.Context, t *asynq.Task) error {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			p.logger(ctx).Debug("image skipped", "path", item.Path, "provider", c.Provider, "error", err)
+			p.logger(ctx).Warn("image skipped", "path", item.Path, "provider", c.Provider, "error", err)
 			continue
 		}
 		saved[c.Type]++
