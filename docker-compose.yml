@@ -13,7 +13,7 @@ services:
 
     indexer:
         build: .
-        image: ghcr.io/flixermedia/flixer-indexer:latest
+        image: flixermedia/flixer-indexer:latest
         restart: unless-stopped
         depends_on:
             redis:
