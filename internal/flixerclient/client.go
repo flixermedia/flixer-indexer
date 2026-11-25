@@ -32,7 +32,16 @@ const (
 	scanStatePath       = "/api/indexer/media/scan-state"
 	scanSeenPath        = "/api/indexer/media/scan-seen"
 	librariesPathSuffix = "/remove-paths"
+	permissionErrorPath = "/api/indexer/permission-error"
 )
+
+// PermissionErrorReport describes a filesystem permission failure to forward to flixer admins.
+type PermissionErrorReport struct {
+	Source    string `json:"source"`
+	Operation string `json:"operation,omitempty"`
+	Path      string `json:"path,omitempty"`
+	Message   string `json:"message"`
+}
 
 // API is everything the indexer needs from flixer.
 type API interface {
@@ -58,6 +67,8 @@ type API interface {
 	PruneLibrary(ctx context.Context, libraryID, scanStartedAt string) (int, error)
 	// DeleteItemsAtPaths removes indexed items at exact paths or recursively within directory paths.
 	DeleteItemsAtPaths(ctx context.Context, libraryID string, targets []models.PathRemoval) (int, error)
+	// ReportPermissionError notifies flixer admins about a filesystem permission failure.
+	ReportPermissionError(ctx context.Context, report PermissionErrorReport) error
 }
 
 func (c *Client) ScanState(ctx context.Context, libraryID, afterID string, limit int) ([]models.ScanState, error) {
@@ -249,6 +260,10 @@ func (c *Client) DeleteItemsAtPaths(ctx context.Context, libraryID string, targe
 		return 0, err
 	}
 	return body.Removed, nil
+}
+
+func (c *Client) ReportPermissionError(ctx context.Context, report PermissionErrorReport) error {
+	return c.do(ctx, http.MethodPost, permissionErrorPath, report, nil)
 }
 
 func normalizeLibrary(lib *models.Library) {

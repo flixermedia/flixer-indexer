@@ -4,6 +4,7 @@ package watcher
 
 import (
 	"context"
+	"errors"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -29,6 +30,8 @@ type Scanner interface {
 type Watcher struct {
 	Scanner Scanner
 	Log     *slog.Logger
+	// OnPermissionError is called when watching or stating a path fails with os.ErrPermission.
+	OnPermissionError func(ctx context.Context, operation, path string, err error)
 	// Debounce is how long a library must be quiet before it is scanned, so a large copy finishes first.
 	Debounce time.Duration
 	// Rescan scans every library at this interval regardless of events. Network shares (SMB/NFS) do not
@@ -92,6 +95,7 @@ func (w *Watcher) Run(ctx context.Context) error {
 				return nil
 			}
 			w.Log.Warn("folder watcher error", "error", err)
+			w.reportPermission(ctx, "watcher", "", err)
 		case <-syncTick.C:
 			w.sync(ctx)
 		case <-tick.C:
@@ -184,6 +188,7 @@ func (w *Watcher) flush(ctx context.Context) {
 					paths = append(paths, path)
 				} else if !os.IsNotExist(err) {
 					w.Log.Warn("could not stat changed path", "library", lib, "path", path, "error", err)
+					w.reportPermission(ctx, "watcher:stat", path, err)
 				}
 			}
 			paths = compactPaths(paths)
@@ -342,7 +347,15 @@ func (w *Watcher) sync(ctx context.Context) {
 func (w *Watcher) addTree(dir, lib string) int {
 	count := 0
 	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || !d.IsDir() {
+		if err != nil {
+			if errors.Is(err, os.ErrPermission) {
+				w.Log.Warn("could not read folder while watching", "folder", path, "error", err)
+				w.reportPermission(context.Background(), "watcher:walk", path, err)
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !d.IsDir() {
 			return nil
 		}
 		if path != dir && strings.HasPrefix(d.Name(), ".") {
@@ -352,6 +365,11 @@ func (w *Watcher) addTree(dir, lib string) int {
 			return nil
 		}
 		if err := w.fs.Add(path); err != nil {
+			if errors.Is(err, os.ErrPermission) {
+				w.Log.Warn("could not watch folder", "folder", path, "error", err)
+				w.reportPermission(context.Background(), "watcher:add", path, err)
+				return filepath.SkipDir
+			}
 			if !w.limitHit {
 				w.limitHit = true
 				w.Log.Warn("could not watch every folder (raise fs.inotify.max_user_watches); set WATCH_RESCAN_INTERVAL to cover the rest", "folder", path, "error", err)
@@ -363,6 +381,12 @@ func (w *Watcher) addTree(dir, lib string) int {
 		return nil
 	})
 	return count
+}
+
+func (w *Watcher) reportPermission(ctx context.Context, operation, path string, err error) {
+	if w.OnPermissionError != nil && err != nil && errors.Is(err, os.ErrPermission) {
+		w.OnPermissionError(ctx, operation, path, err)
+	}
 }
 
 func (w *Watcher) drop(root string) {

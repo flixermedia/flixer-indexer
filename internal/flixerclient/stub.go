@@ -66,6 +66,10 @@ func (s *Stub) DeleteItemsAtPaths(context.Context, string, []models.PathRemoval)
 	return 0, nil
 }
 
+func (s *Stub) ReportPermissionError(context.Context, PermissionErrorReport) error {
+	return nil
+}
+
 func (s *Stub) IntroSyncCandidates(context.Context, string, string, string, int) ([]models.IntroSyncCandidate, string, error) {
 	return nil, "", nil
 }

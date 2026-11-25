@@ -181,7 +181,7 @@ func run() error {
 	monitoring.Go(func() { reloader.Run(ctx) })
 	if cfg.WatchFolders && cfg.Role != config.RoleWorker {
 		monitoring.Go(func() {
-			w := &watcher.Watcher{Scanner: pipe, Log: log, Debounce: cfg.WatchDebounce, Rescan: cfg.WatchRescan}
+			w := &watcher.Watcher{Scanner: pipe, Log: log, Debounce: cfg.WatchDebounce, Rescan: cfg.WatchRescan, OnPermissionError: pipe.ReportPermissionError}
 			if err := w.Run(ctx); err != nil {
 				log.Error("folder watcher stopped", "error", err)
 			}

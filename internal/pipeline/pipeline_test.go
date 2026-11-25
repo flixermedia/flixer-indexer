@@ -18,6 +18,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/flixermedia/flixer-indexer/internal/config"
+	"github.com/flixermedia/flixer-indexer/internal/flixerclient"
 	"github.com/flixermedia/flixer-indexer/internal/images"
 	"github.com/flixermedia/flixer-indexer/internal/models"
 	"github.com/flixermedia/flixer-indexer/internal/probe"
@@ -68,6 +69,9 @@ func (f *fakeAPI) DeleteItemsAtPaths(_ context.Context, _ string, targets []mode
 	defer f.mu.Unlock()
 	f.removedTargets = append(f.removedTargets, targets...)
 	return len(targets), nil
+}
+func (f *fakeAPI) ReportPermissionError(context.Context, flixerclient.PermissionErrorReport) error {
+	return nil
 }
 
 func (f *fakeAPI) Libraries(context.Context) ([]models.Library, error) { return f.libs, nil }
@@ -887,7 +891,7 @@ func TestTrickplayOnlyScanQueuesOnlyMissingOrStaleResults(t *testing.T) {
 	cache := t.TempDir()
 	for name, sourceSize := range map[string]int64{"current.mkv": int64(len(files["current.mkv"])), "stale.mkv": 1} {
 		relativePath := filepath.ToSlash(filepath.Join("Movies", name))
-		indexDir := filepath.Join(cache, trickplay.Key("root", relativePath))
+		indexDir := filepath.Join(cache, trickplay.Key("root", relativePath), "trickplay")
 		if err := os.MkdirAll(indexDir, 0o755); err != nil {
 			t.Fatal(err)
 		}

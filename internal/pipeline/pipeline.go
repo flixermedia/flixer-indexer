@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -518,6 +519,10 @@ func (p *Pipeline) OnError(ctx context.Context, task *asynq.Task, err error) {
 		level = slog.LevelError
 	}
 	p.Log.Log(ctx, level, "task failed", "type", task.Type(), "retry", retried, "terminal", terminal, "error", err)
+	if errors.Is(err, os.ErrPermission) {
+		_, _, path := TaskSubject(task.Type(), task.Payload())
+		p.ReportPermissionError(ctx, task.Type(), path, err)
+	}
 	if !terminal || task.Type() == TypeScan || task.Type() == TypeRefresh || task.Type() == TypeLyrics {
 		return
 	}
@@ -536,6 +541,23 @@ func (p *Pipeline) OnError(ctx context.Context, task *asynq.Task, err error) {
 		if progressErr := p.Progress.Failed(context.WithoutCancel(ctx), w.Item.LibraryID, w.ScanID, progressItemID(w.Item.Type, w.Item.Path)); progressErr != nil {
 			p.Log.Error("could not record task failure", "error", progressErr)
 		}
+	}
+}
+
+// ReportPermissionError forwards filesystem permission failures to flixer so admins are notified.
+func (p *Pipeline) ReportPermissionError(ctx context.Context, operation, path string, err error) {
+	if p.Client == nil || err == nil || !errors.Is(err, os.ErrPermission) {
+		return
+	}
+	reportCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if reportErr := p.Client.ReportPermissionError(reportCtx, flixerclient.PermissionErrorReport{
+		Source:    "flixer-indexer",
+		Operation: operation,
+		Path:      path,
+		Message:   err.Error(),
+	}); reportErr != nil {
+		p.Log.Warn("could not report permission error to flixer", "operation", operation, "path", path, "error", reportErr)
 	}
 }
 
