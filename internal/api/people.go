@@ -26,7 +26,7 @@ var personPhotoHosts = map[string]bool{
 
 const (
 	maxPersonPhoto  = 5 << 20
-	personCacheDir  = "people"
+	personCacheDir  = "providers/people"
 	personFetchWait = 15 * time.Second
 )
 

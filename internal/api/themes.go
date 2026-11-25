@@ -9,23 +9,28 @@ import (
 
 const maxThemeQueue = 500
 
-// theme serves an item's theme song if one has been downloaded. The path comes
-// from the signed body but is only used to look up files this service wrote.
-func (s *Server) theme(w http.ResponseWriter, r *http.Request) {
+func (s *Server) locateTheme(w http.ResponseWriter, r *http.Request) (string, bool) {
 	var task themes.Task
 	if !decode(w, r, &task) {
-		return
+		return "", false
 	}
 	if s.Pipeline.Themes == nil || task.LibraryID == "" || task.Path == "" {
-		writeError(w, http.StatusNotFound, "no theme")
-		return
+		return "", true
 	}
 	lib, err := s.Pipeline.Library(r.Context(), task.LibraryID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "no theme")
+		return "", true
+	}
+	return s.Pipeline.Themes.Locate(lib, task, s.Pipeline.FolderRoot(lib, task.Path)), true
+}
+
+// theme serves an item's theme song if one has been downloaded. The path comes
+// from the signed body but is only used to look up files this service wrote.
+func (s *Server) theme(w http.ResponseWriter, r *http.Request) {
+	path, ok := s.locateTheme(w, r)
+	if !ok {
 		return
 	}
-	path := s.Pipeline.Themes.Locate(lib, task, s.Pipeline.FolderRoot(lib, task.Path))
 	if path == "" {
 		writeError(w, http.StatusNotFound, "no theme")
 		return
@@ -44,6 +49,21 @@ func (s *Server) theme(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "audio/mpeg")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	http.ServeContent(w, r, themes.FileName, info.ModTime(), f)
+}
+
+// themeExists reports whether a downloaded theme song is present on disk.
+func (s *Server) themeExists(w http.ResponseWriter, r *http.Request) {
+	path, ok := s.locateTheme(w, r)
+	if !ok {
+		return
+	}
+	exists := false
+	if path != "" {
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			exists = true
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"exists": exists})
 }
 
 type queueThemesRequest struct {

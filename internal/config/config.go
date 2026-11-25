@@ -235,9 +235,9 @@ func Load() (Config, error) {
 	if abs, err := filepath.Abs(cachePath); err == nil {
 		cachePath = abs
 	}
-	lyricsDefault := filepath.Join(dataPath, "cache", "lyrics")
+	lyricsDefault := filepath.Join(dataPath, "cache", "library", "lyrics")
 	if dataPath == "" {
-		lyricsDefault = "./cache/lyrics"
+		lyricsDefault = "./cache/library/lyrics"
 	}
 	lyricsDir := envOrDefault("LYRICS_PATH", lyricsDefault)
 	if abs, err := filepath.Abs(lyricsDir); err == nil {
@@ -280,8 +280,8 @@ func Load() (Config, error) {
 		FFprobePath:       ffprobe,
 		FFmpegPath:        envOrDefault("FFMPEG_PATH", "ffmpeg"),
 		TrickplayEnabled:  trickplayEnabled,
-		TrickplayDir:      filepath.Clean(envOrDefault("TRICKPLAY_DIR", filepath.Join(cachePath, "trickplay"))),
-		SubtitleDir:       filepath.Clean(envOrDefault("SUBTITLE_DIR", filepath.Join(cachePath, "subtitles"))),
+		TrickplayDir:      filepath.Clean(envOrDefault("TRICKPLAY_DIR", filepath.Join(cachePath, "library"))),
+		SubtitleDir:       filepath.Clean(envOrDefault("SUBTITLE_DIR", filepath.Join(cachePath, "library"))),
 		TrickplayInterval: trickplayInterval,
 		TrickplayWidth:    trickplayWidth,
 		Concurrency:       concurrency,

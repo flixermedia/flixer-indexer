@@ -286,12 +286,24 @@ func extFor(format string) string {
 	return format
 }
 
+func storageName(itemType, imgType string) string {
+	switch imgType {
+	case models.ImagePoster:
+		return "folder"
+	case models.ImageThumb:
+		if itemType != models.ItemEpisode && itemType != models.ItemVideo {
+			return "landscape"
+		}
+	}
+	return imgType
+}
+
 func alongsidePath(p Placement, img models.Image, index int, ext string) string {
 	suffix := ""
 	if index > 0 {
 		suffix = fmt.Sprint(index)
 	}
-	name := img.Type + suffix
+	name := storageName(p.Item.Type, img.Type) + suffix
 	item := p.Item
 	switch item.Type {
 	case models.ItemSeries, models.ItemAlbum:
@@ -315,11 +327,11 @@ func (s *Store) cachePath(p Placement, imgType string, index int, ext string) (s
 	if err != nil {
 		return "", fmt.Errorf("cache artwork: %w", err)
 	}
-	name := imgType
+	name := storageName(p.Item.Type, imgType)
 	if index > 0 {
 		name += fmt.Sprint(index)
 	}
-	return filepath.Join(s.CachePath, "images", key, name+"."+ext), nil
+	return filepath.Join(s.CachePath, "library", key, name+"."+ext), nil
 }
 
 func writeAtomic(dest string, data []byte) error {

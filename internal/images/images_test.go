@@ -48,15 +48,31 @@ func TestSaveAlongsideAndCache(t *testing.T) {
 
 	p := Placement{Library: models.Library{ID: "l", ImageStorage: models.StorageAlongside}, Item: item, FolderRoot: root}
 	img, err := s.Save(context.Background(), p, models.Image{Type: "poster", URL: srv.URL + "/ok.png"}, 0)
-	if err != nil || img.Path != filepath.Join(movieDir, "poster.png") || img.Width != 200 {
-		t.Fatalf("alongside: %+v, %v", img, err)
+	if err != nil || img.Path != filepath.Join(movieDir, "folder.png") || img.Width != 200 {
+		t.Fatalf("alongside poster: %+v, %v", img, err)
+	}
+	img, err = s.Save(context.Background(), p, models.Image{Type: "thumb", URL: srv.URL + "/ok.png"}, 0)
+	if err != nil || img.Path != filepath.Join(movieDir, "landscape.png") {
+		t.Fatalf("alongside landscape: %+v, %v", img, err)
 	}
 
 	p.Library.ImageStorage = models.StorageCache
 	img, err = s.Save(context.Background(), p, models.Image{Type: "backdrop", URL: srv.URL + "/ok.png"}, 1)
 	key, _ := mediaid.Key(item.RootID, item.RelativePath)
-	if err != nil || filepath.Dir(img.Path) != filepath.Join(cache, "images", key) || filepath.Base(img.Path) != "backdrop1.png" {
+	if err != nil || filepath.Dir(img.Path) != filepath.Join(cache, "library", key) || filepath.Base(img.Path) != "backdrop1.png" {
 		t.Fatalf("cache: %+v, %v", img, err)
+	}
+	img, err = s.Save(context.Background(), p, models.Image{Type: "thumb", URL: srv.URL + "/ok.png"}, 0)
+	if err != nil || filepath.Dir(img.Path) != filepath.Join(cache, "library", key) || filepath.Base(img.Path) != "landscape.png" {
+		t.Fatalf("cache landscape: %+v, %v", img, err)
+	}
+
+	ep := models.Item{Type: models.ItemEpisode, Path: filepath.Join(root, "Show", "S01E01.mkv"), RootID: "root", RelativePath: "Show/S01E01.mkv"}
+	epPlacement := Placement{Library: models.Library{ID: "l", ImageStorage: models.StorageCache}, Item: ep, FolderRoot: root}
+	img, err = s.Save(context.Background(), epPlacement, models.Image{Type: "thumb", URL: srv.URL + "/ok.png"}, 0)
+	epKey, _ := mediaid.Key(ep.RootID, ep.RelativePath)
+	if err != nil || filepath.Dir(img.Path) != filepath.Join(cache, "library", epKey) || filepath.Base(img.Path) != "thumb.png" {
+		t.Fatalf("episode cache thumb: %+v, %v", img, err)
 	}
 }
 

@@ -53,8 +53,33 @@ func TestMovieLookup(t *testing.T) {
 	if len(m.Crew) != 1 || m.Crew[0].Type != "director" {
 		t.Errorf("crew = %+v", m.Crew)
 	}
-	if len(res.Images) != 2 || res.Images[0].Type != "poster" || res.Images[1].URL != imageBase+"/b.jpg" {
+	if len(res.Images) != 3 || res.Images[0].Type != "poster" || res.Images[1].URL != imageBase+"/b.jpg" || res.Images[2].Type != "thumb" || res.Images[2].URL != imageBase+"/b.jpg" {
 		t.Errorf("images = %+v", res.Images)
+	}
+}
+
+func TestPickLandscapePrefersLanguageBackdrop(t *testing.T) {
+	p := New("key", "test")
+	images := p.pickImages(imageSet{
+		Backdrops: []image{
+			{FilePath: "/textless.jpg", Width: 3840, Height: 2160, Lang: "", Vote: 9},
+			{FilePath: "/titled-en.jpg", Width: 1920, Height: 1080, Lang: "en", Vote: 5},
+		},
+	})
+	var thumbURL string
+	var backdropURLs []string
+	for _, img := range images {
+		if img.Type == "thumb" {
+			thumbURL = img.URL
+		} else if img.Type == "backdrop" {
+			backdropURLs = append(backdropURLs, img.URL)
+		}
+	}
+	if thumbURL != imageBase+"/titled-en.jpg" {
+		t.Fatalf("landscape thumb = %q, want %q", thumbURL, imageBase+"/titled-en.jpg")
+	}
+	if len(backdropURLs) != 1 || backdropURLs[0] != imageBase+"/textless.jpg" {
+		t.Fatalf("backdrops = %v, want [%q]", backdropURLs, imageBase+"/textless.jpg")
 	}
 }
 

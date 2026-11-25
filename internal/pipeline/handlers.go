@@ -474,7 +474,7 @@ func (p *Pipeline) handleIdentify(ctx context.Context, t *asynq.Task) error {
 			}
 		}
 
-		if hasJob(w, "images") || len(w.Jobs) == 0 {
+		if !lib.IgnoreLocalImages && (hasJob(w, "images") || len(w.Jobs) == 0) {
 			if local := images.FindLocal(*item, root); len(local) > 0 {
 				item.Images = local
 				item.LocalImagesUsed = true
@@ -745,13 +745,14 @@ func (p *Pipeline) handleImages(ctx context.Context, t *asynq.Task) error {
 	saved := map[string]int{}
 	seen := map[string]bool{}
 	for _, c := range candidates {
-		if have[c.Type] || seen[c.URL] || saved[c.Type] >= imageQuota[c.Type] {
+		seenKey := c.Type + "\x00" + c.URL
+		if have[c.Type] || seen[seenKey] || saved[c.Type] >= imageQuota[c.Type] {
 			continue
 		}
 		if item.Type == models.ItemSeason && c.Season != nil && item.SeasonNumber != nil && *c.Season != *item.SeasonNumber {
 			continue
 		}
-		seen[c.URL] = true
+		seen[seenKey] = true
 		img, err := p.Images.Save(ctx, place, c, saved[c.Type])
 		if err != nil {
 			if ctx.Err() != nil {

@@ -85,7 +85,7 @@ func Key(rootID, relativePath string) string {
 }
 
 func (g *Generator) hasCurrentIndex(task Task, info os.FileInfo) (bool, error) {
-	current, err := os.ReadFile(filepath.Join(g.Directory, Key(task.RootID, task.RelativePath), "index.json"))
+	current, err := os.ReadFile(filepath.Join(g.Directory, Key(task.RootID, task.RelativePath), "trickplay", "index.json"))
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}
@@ -116,7 +116,8 @@ func (g *Generator) Generate(ctx context.Context, task Task) error {
 	}
 	modified := info.ModTime().UTC().Format(time.RFC3339)
 	key := Key(task.RootID, task.RelativePath)
-	destination := filepath.Join(g.Directory, key)
+	itemDir := filepath.Join(g.Directory, key)
+	destination := filepath.Join(itemDir, "trickplay")
 	current, err := g.hasCurrentIndex(task, info)
 	if err != nil {
 		return fmt.Errorf("inspect existing trickplay index: %w", err)
@@ -143,13 +144,13 @@ func (g *Generator) Generate(ctx context.Context, task Task) error {
 	if g.Interval < 2 || g.Interval > 60 || g.Width < 80 || g.Width > 640 {
 		return errors.New("invalid trickplay settings")
 	}
-	if err := os.MkdirAll(g.Directory, 0o755); err != nil {
+	if err := os.MkdirAll(itemDir, 0o755); err != nil {
 		return fmt.Errorf("create trickplay directory: %w", err)
 	}
-	if err := os.Chmod(g.Directory, 0o755); err != nil {
+	if err := os.Chmod(itemDir, 0o755); err != nil {
 		return fmt.Errorf("set trickplay directory permissions: %w", err)
 	}
-	workDir, err := os.MkdirTemp(g.Directory, "."+key+".tmp-")
+	workDir, err := os.MkdirTemp(itemDir, ".trickplay.tmp-")
 	if err != nil {
 		return fmt.Errorf("create temporary trickplay directory: %w", err)
 	}

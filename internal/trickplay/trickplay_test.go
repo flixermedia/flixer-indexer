@@ -68,7 +68,7 @@ func TestGenerateWritesAtomicPublicIndexAndSkipsMatchingSource(t *testing.T) {
 	if runs != 1 {
 		t.Fatalf("runner calls = %d", runs)
 	}
-	keyDir := filepath.Join(cache, Key(task.RootID, task.RelativePath))
+	keyDir := filepath.Join(cache, Key(task.RootID, task.RelativePath), "trickplay")
 	data, err := os.ReadFile(filepath.Join(keyDir, "index.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -135,7 +135,7 @@ func TestGenerateSkipsShortAndEmptyUnknownDuration(t *testing.T) {
 	if runs != 1 {
 		t.Fatalf("empty unknown-duration file invoked ffmpeg %d times", runs)
 	}
-	if _, err := os.Stat(filepath.Join(generator.Directory, Key(task.RootID, task.RelativePath), "index.json")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(generator.Directory, Key(task.RootID, task.RelativePath), "trickplay", "index.json")); !os.IsNotExist(err) {
 		t.Fatalf("unexpected index after empty ffmpeg output: %v", err)
 	}
 }
@@ -172,7 +172,7 @@ func TestGenerateUnknownDurationCountsFramesAndSkipsNonVideo(t *testing.T) {
 	if err := generator.Generate(context.Background(), task); err != nil {
 		t.Fatal(err)
 	}
-	data, err := os.ReadFile(filepath.Join(generator.Directory, Key(task.RootID, task.RelativePath), "index.json"))
+	data, err := os.ReadFile(filepath.Join(generator.Directory, Key(task.RootID, task.RelativePath), "trickplay", "index.json"))
 	if err != nil {
 		t.Fatal(err)
 	}

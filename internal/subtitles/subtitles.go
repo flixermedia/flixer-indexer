@@ -80,7 +80,7 @@ func FallbackDir(root, rootID, relativePath string) string {
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(root, key)
+	return filepath.Join(root, key, "subtitles")
 }
 
 // List returns the subtitle files beside the video and in the fallback folder,

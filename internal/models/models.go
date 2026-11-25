@@ -56,12 +56,13 @@ type Folder struct {
 
 // Library is a media library declared by an admin in flixer.
 type Library struct {
-	ID           string   `json:"id"`
-	Name         string   `json:"name"`
-	Type         string   `json:"type"`
-	ImageStorage string   `json:"imageStorage"`
-	Providers    []string `json:"providers,omitempty"`
-	Folders      []Folder `json:"folders"`
+	ID                string   `json:"id"`
+	Name              string   `json:"name"`
+	Type              string   `json:"type"`
+	ImageStorage      string   `json:"imageStorage"`
+	IgnoreLocalImages bool     `json:"ignoreLocalImages"`
+	Providers         []string `json:"providers,omitempty"`
+	Folders           []Folder `json:"folders"`
 }
 
 // ProviderSetting is one provider's configuration from flixer.

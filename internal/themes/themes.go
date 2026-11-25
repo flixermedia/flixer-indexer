@@ -72,7 +72,7 @@ func (f *Fetcher) Paths(lib models.Library, t Task, folderRoot string) (alongsid
 	if err != nil {
 		return "", ""
 	}
-	cached = filepath.Join(f.CacheDir, "theme", key, FileName)
+	cached = filepath.Join(f.CacheDir, "library", key, FileName)
 	dir := t.Path
 	if t.ItemType == models.ItemMovie {
 		dir = filepath.Dir(t.Path)

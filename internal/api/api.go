@@ -75,6 +75,7 @@ func (s *Server) Handler() http.Handler {
 	signed.HandleFunc("POST /internal/concurrency", s.setConcurrency)
 	signed.HandleFunc("POST /internal/image", s.image)
 	signed.HandleFunc("POST /internal/theme", s.theme)
+	signed.HandleFunc("POST /internal/theme/exists", s.themeExists)
 	signed.HandleFunc("POST /internal/themes/queue", s.queueThemes)
 	signed.HandleFunc("POST /internal/intro/queue", s.queueIntroSegments)
 	signed.HandleFunc("POST /internal/people/image", s.personImage)

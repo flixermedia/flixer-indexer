@@ -113,7 +113,7 @@ func TestFetchStorage(t *testing.T) {
 		}
 		got := f.Locate(lib, task, media)
 		key, _ := mediaid.Key(task.RootID, task.RelativePath)
-		if got != filepath.Join(f.CacheDir, "theme", key, FileName) {
+		if got != filepath.Join(f.CacheDir, "library", key, FileName) {
 			t.Fatalf("theme at %q", got)
 		}
 	})

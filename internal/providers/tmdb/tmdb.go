@@ -435,9 +435,49 @@ func (p *Provider) pickImages(set imageSet) []models.Image {
 		}
 	}
 	add(models.ImagePoster, set.Posters, maxImagesPer)
-	add(models.ImageBackdrop, set.Backdrops, maxImagesPer)
+	landscape, hasLandscape := p.pickLandscape(set.Backdrops)
+	backdrops := set.Backdrops
+	if hasLandscape && len(backdrops) > 1 {
+		filtered := make([]image, 0, len(backdrops)-1)
+		for _, img := range backdrops {
+			if p.images+img.FilePath != landscape.URL {
+				filtered = append(filtered, img)
+			}
+		}
+		backdrops = filtered
+	}
+	add(models.ImageBackdrop, backdrops, maxImagesPer)
 	add(models.ImageLogo, set.Logos, 1)
+	if hasLandscape {
+		out = append(out, landscape)
+	}
 	return out
+}
+
+// pickLandscape selects a 16:9 backdrop to serve as the Jellyfin-style landscape
+// thumb, preferring a language-tagged backdrop when available.
+func (p *Provider) pickLandscape(backdrops []image) (models.Image, bool) {
+	if len(backdrops) == 0 {
+		return models.Image{}, false
+	}
+	sorted := append([]image(nil), backdrops...)
+	sort.SliceStable(sorted, func(i, j int) bool { return rank(sorted[i]) > rank(sorted[j]) })
+	chosen := sorted[0]
+	foundLang := false
+	for _, img := range sorted {
+		if img.Lang != "" {
+			chosen = img
+			foundLang = true
+			break
+		}
+	}
+	if !foundLang && len(sorted) > 1 {
+		chosen = sorted[1]
+	}
+	return models.Image{
+		Type: models.ImageThumb, URL: p.images + chosen.FilePath, Provider: "tmdb",
+		Width: chosen.Width, Height: chosen.Height, Language: chosen.Lang, Score: chosen.Vote,
+	}, true
 }
 
 // rank prefers English or language-neutral artwork, then the community vote.
